@@ -1,18 +1,34 @@
 [project]
 name = "triton-eval"
 version = "0.1.0"
-description = "Add your description here"
+description = "A simple triton/cuda execution framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.6"
+    "torch==2.6+cu126",
+    "numpy",
+    "pydantic",
+    "setuptools",
+    "ninja",
+    "rich",
+    "simple_parsing",
 ]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu126" }
 
 [[tool.uv.index]]
-# Optional name for the index.
 name = "pytorch-cu126"
-# Required URL for the index.
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.setuptools]
+packages = ["triton_eval"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
+lint = [
+    "ruff>=0.11.4",
+]
