@@ -478,69 +478,6 @@ def eval_kernel_against_ref(
     return kernel_exec_result
 
 
-def evaluate_single_sample_src(
-    ref_arch_src: str,
-    kernel_src: str,
-    ref_entry_point: str,
-    kernel_entry_point: str,
-    configs: dict,
-    device: torch.device,
-) -> KernelExecResult:
-    """
-    NOTE: entry points need to be passed in
-    Evaluate a single sample source code against a reference source code
-    """
-
-    kernel_hash = str(hash(kernel_src))
-    build_dir = os.path.join(configs["build_dir_prefix"], "test_build", kernel_hash)
-
-    if configs["clear_cache"]:  # fresh kernel build
-        print(f"[INFO] Clearing cache for build directory: {build_dir}")
-        shutil.rmtree(build_dir, ignore_errors=True)
-
-    num_correct_trials = configs["num_correct_trials"]
-    num_perf_trials = configs["num_perf_trials"]
-    verbose = configs["verbose"]
-    measure_performance = configs["measure_performance"]
-    try:
-        eval_result = eval_kernel_against_ref(
-            original_model_src=ref_arch_src,
-            custom_model_src=kernel_src,
-            original_entry_point=ref_entry_point,
-            custom_entry_point=kernel_entry_point,
-            measure_performance=measure_performance,
-            verbose=verbose,
-            num_correct_trials=num_correct_trials,
-            num_perf_trials=num_perf_trials,
-            build_dir=build_dir,
-            device=device,
-        )
-        return eval_result
-    except Exception as e:
-        print(f"[WARNING] Last level catch: Some issue evaluating for kernel: {e} ")
-        if "CUDA error" in str(e):
-            # NOTE: count this as compilation failure as it is not runnable code
-            metadata = {
-                "cuda_error": f"CUDA Error: {str(e)}",
-                "hardware": torch.cuda.get_device_name(device=device),
-                "device": str(device),
-            }
-            eval_result = KernelExecResult(
-                compiled=False, correctness=False, metadata=metadata
-            )
-            return eval_result
-        else:
-            metadata = {
-                "other_error": f"error: {str(e)}",
-                "hardware": torch.cuda.get_device_name(device=device),
-                "device": str(device),
-            }
-            eval_result = KernelExecResult(
-                compiled=False, correctness=False, metadata=metadata
-            )
-            return eval_result
-
-
 def register_and_format_exception(
     exception_type: str,
     exception_msg: Exception | str,
