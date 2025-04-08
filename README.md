@@ -1,4 +1,4 @@
-# Evaluating Custom Kernels with `run_and_check.py`
+# Evaluating Custom Kernels (Cuda and Triton)
 
 This script evaluates a custom kernel implementation (e.g., written in Triton or CUDA via Python) against a reference PyTorch implementation for correctness and optionally performance.
 
