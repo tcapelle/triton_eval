@@ -12,6 +12,7 @@ dependencies = [
     "ninja",
     "rich",
     "simple_parsing",
+    "modal>=0.73.153",
 ]
 
 [tool.uv.sources]

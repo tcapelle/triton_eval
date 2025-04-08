@@ -5,7 +5,8 @@ from rich.console import Console
 from rich.pretty import pprint
 import os
 
-
+# Import the utility function
+from triton_eval.utils import read_file
 from triton_eval.eval import eval_kernel_against_ref, detect_backend
 
 """
@@ -41,25 +42,19 @@ def main():
     console.print(f"Loading reference source from: [cyan]{args.ref_src}[/cyan]")
     console.print(f"Loading custom source from: [cyan]{args.custom_src}[/cyan]")
 
-    try:
-        with open(args.ref_src, 'r', encoding='utf-8') as f:
-            ref_src_code = f.read()
-        with open(args.custom_src, 'r', encoding='utf-8') as f:
-            custom_src_code = f.read()
-    except FileNotFoundError as e:
-        console.print(f"[bold red]Error:[/bold red] Could not read source file: {e}")
+    # Use the utility function to read files
+    ref_src_code = read_file(args.ref_src)
+    custom_src_code = read_file(args.custom_src)
+
+    # Check if files were read successfully (read_file returns "" on error)
+    if not ref_src_code or not custom_src_code:
+        console.print("[bold red]Error:[/bold red] Failed to read one or both source files. Check previous messages for details.")
         exit(1)
-    except Exception as e:
-        console.print(f"[bold red]Error:[/bold red] An error occurred reading files: {e}")
-        exit(1)
+
 
     console.rule("[bold blue]Backend Detection & Device Setup[/bold blue]")
     backend = detect_backend(custom_src_code)
     console.print(f"Detected backend: [yellow]{backend}[/yellow]")
-
-    if not torch.cuda.is_available():
-        console.print("[bold red]Error:[/bold red] CUDA is not available.")
-        exit(1)
 
     try:
         device = torch.device(args.device)
@@ -67,19 +62,6 @@ def main():
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] Invalid device string '{args.device}': {e}")
         exit(1)
-
-    # Create a dictionary for eval config matching evaluate_single_sample_src expectations
-    # Although we call eval_kernel_against_ref directly, it expects build_dir etc.
-    # NOTE: This dict isn't strictly necessary anymore as args holds the values directly,
-    # but keeping it for clarity in mapping to build_dir logic if needed elsewhere.
-    eval_configs = {
-        "num_correct_trials": args.num_correct_trials,
-        "num_perf_trials": args.num_perf_trials,
-        "verbose": args.verbose,
-        "measure_performance": args.measure_performance,
-        "build_dir_prefix": args.build_dir_prefix,
-        "clear_cache": args.clear_cache, # This specific flag is handled in evaluate_single_sample_src, but we pass build_dir below
-    }
 
     console.rule("[bold blue]Build Directory Setup[/bold blue]")
     # Construct build directory path (similar logic to evaluate_single_sample_src)
