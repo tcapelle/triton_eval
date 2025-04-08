@@ -22,7 +22,7 @@ import modal
 GPU_TYPE = "H100!"
 
 # Configure Modal image
-cuda_version = "12.8.0"
+cuda_version = "12.6.0"
 flavor = "devel"
 operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
@@ -35,10 +35,6 @@ image = (
         "torch", # Ensure torch is available in the Modal environment
         # Add other direct dependencies if needed
     )
-    # Add the local triton_eval package.
-    # Assumes 'triton_eval' directory is at the workspace root and contains an installable package.
-    # If it's just a directory, use .add_local_dir("triton_eval", "/root/triton_eval")
-    # and potentially manage sys.path inside the Modal function.
     .add_local_python_source("triton_eval")
 )
 
