@@ -4,29 +4,28 @@ This script evaluates a custom kernel implementation (e.g., written in Triton or
 
 ## Usage
 
+Run evaluation locally:
 ```bash
 python scripts/run_and_check.py --ref_src <path_to_ref.py> --custom_src <path_to_custom.py> [OPTIONS]
 ```
 
+Run evaluation remotely using Modal:
+```bash
+modal run scripts/run_and_check_modal.py --ref_src <path_to_ref.py> --custom_src <path_to_custom.py> [MODAL_OPTIONS] [OPTIONS]
+```
+
+
 ## Arguments
 
-The script uses `simple_parsing` to define its arguments. Here are the available options:
+The scripts use `simple_parsing` for argument handling. Key arguments include paths to the reference (`--ref_src`) and custom (`--custom_src`) source files, entry point names (`--ref_entry_point`, `--custom_entry_point`), and options for performance measurement (`--measure_performance`) and verbosity (`--verbose`).
 
-*   `--ref_src` (str, required): Path to the reference Python source file containing the reference `nn.Module`.
-*   `--custom_src` (str, required): Path to the custom Python source file containing the `nn.Module` with the kernel to be evaluated.
-*   `--ref_entry_point` (str, default: `"Model"`): Class name of the reference `nn.Module` within the `ref_src` file.
-*   `--custom_entry_point` (str, default: `"ModelNew"`): Class name of the custom `nn.Module` within the `custom_src` file.
-*   `--device` (str, default: `"cuda:0"`): The CUDA device to run the evaluation on (e.g., 'cuda:0', 'cuda:1').
-*   `--verbose` (bool, flag, default: `False`): Enable verbose output during evaluation, showing detailed comparison results.
-*   `--measure_performance` (bool, flag, default: `False`): Enable performance measurement alongside correctness checks.
-*   `--num_correct_trials` (int, default: `1`): Number of independent trials to run for correctness checking. Each trial uses different random inputs.
-*   `--num_perf_trials` (int, default: `10`): Number of independent trials to run for performance measurement.
-*   `--build_dir_prefix` (str, default: `"/tmp/triton_eval_builds"`): Prefix for the directory where compiled kernels and temporary build files will be stored. A unique subdirectory based on the kernel source hash will be created under this prefix.
-*   `--clear_cache` (bool, flag, default: `False`): If set, the specific build cache directory for the current `custom_src` will be removed before running the evaluation.
+Use the `--help` flag for a full list of options for each script (e.g., `python scripts/run_and_check.py --help`).
+
+`scripts/run_and_check_modal.py` accepts additional Modal-specific arguments like `--gpu` and `--timeout`.
 
 ## Examples
 
-### CUDA Kernel Evaluation
+### CUDA Kernel Evaluation (Local)
 
 ```bash
 python scripts/run_and_check.py \
@@ -35,7 +34,7 @@ python scripts/run_and_check.py \
 ```
 *(Assumes default entry point names "Model" and "ModelNew")*
 
-### Triton Kernel Evaluation
+### Triton Kernel Evaluation (Local)
 
 ```bash
 python scripts/run_and_check.py \
@@ -44,6 +43,18 @@ python scripts/run_and_check.py \
     --ref_entry_point LinearEmbedding \
     --custom_entry_point LinearEmbeddingNew \
     --measure_performance
+```
+
+### Triton Kernel Evaluation (Modal)
+
+Run the same Triton example on an H100 GPU using Modal:
+```bash
+modal run scripts/run_and_check_modal.py \
+    --ref_src tests/test_data/triton/embed_code.py \
+    --custom_src tests/test_data/triton/embed_triton.py \
+    --ref_entry_point LinearEmbedding \
+    --custom_entry_point LinearEmbeddingNew \
+    --gpu H100
 ```
 ![](assets/triton.png)
 
