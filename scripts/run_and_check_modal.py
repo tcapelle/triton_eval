@@ -4,31 +4,57 @@ Runs kernel evaluation using Modal.
 Example Usage:
 
 # Cuda Example (on an H100 GPU, measuring performance):
-modal run scripts/run_and_check_modal.py --ref-src tests/test_data/cuda/model_ex_add.py --custom-src tests/test_data/cuda/model_new_ex_add.py --gpu H100 --measure-performance
+modal run scripts/run_and_check_modal.py \
+    --ref_src tests/test_data/cuda/model_ex_add.py \
+    --custom_src tests/test_data/cuda/model_new_ex_add.py \
+    --gpu H100 
 
 # Triton Example (on an H100 GPU, measuring performance):
-modal run scripts/run_and_check_modal.py --ref-src tests/test_data/triton/embed_code.py --custom-src tests/test_data/triton/embed_triton.py --ref-entry-point LinearEmbedding --custom-entry-point LinearEmbeddingNew --gpu H100 --measure-performance
+modal run scripts/run_and_check_modal.py \
+    --ref_src tests/test_data/triton/embed_code.py \
+    --custom_src tests/test_data/triton/embed_triton.py \
+    --ref_entry_point LinearEmbedding \
+    --custom_entry_point LinearEmbeddingNew \
+    --gpu H100
 
 """
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 import torch
 from rich.console import Console
 from rich.pretty import pprint
-import os
 import modal
-
+import simple_parsing as sp
 
 GPU_TYPE = "H100!"
 TIMEOUT = 60
+
+
+@dataclass
+class ScriptArgs:
+    ref_src: str
+    custom_src: str
+    ref_entry_point: str = "Model" # Default to "Model" if not provided
+    custom_entry_point: str = "ModelNew" # Default to "ModelNew" if not provided
+    verbose: bool = False # Print verbose output when running the script
+    measure_performance: bool = True # Measure performance of the custom kernel
+    num_correct_trials: int = 1 # Number of correct trials to run
+    num_perf_trials: int = 10 # Number of performance trials to run
+    
+    # Modal specific arguments
+    timeout: int = TIMEOUT # Timeout for the script
+    gpu: str = GPU_TYPE # GPU type to use
+
 
 # Configure Modal image
 cuda_version = "12.6.0"
 flavor = "devel"
 operating_sys = "ubuntu22.04"
+python_version = "3.10"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
 image = (
-    modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python="3.10")
+    modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python=python_version)
     .pip_install(
         "simple_parsing",
         "rich",
@@ -41,16 +67,12 @@ app = modal.App("triton-eval-runner", image=image)
 
 # Import necessary functions *inside* the Modal context
 with image.imports():
-    # Note: local_read_file is defined in main now
     from triton_eval.eval import eval_kernel_against_ref, detect_backend
-    from triton_eval.utils import set_gpu_arch # Import the utility function
-    import torch # Ensure torch is imported within the Modal context as well
+    from triton_eval.utils import set_gpu_arch 
+    import torch 
 
 
-# ScriptArgs dataclass removed as @app.local_entrypoint handles args
-
-
-@app.cls(gpu=GPU_TYPE) # Request any available GPU, timeout set at instantiation
+@app.cls(gpu=GPU_TYPE) # we will override this in the local_entrypoint
 class ModalEvaluator:
     @modal.enter()
     def setup(self):
@@ -107,53 +129,42 @@ class ModalEvaluator:
         return eval_result
 
 
-# Use local_entrypoint for easy CLI usage (e.g., --help)
 @app.local_entrypoint()
-def main(
-    ref_src: str,
-    custom_src: str,
-    ref_entry_point: str = "Model",
-    custom_entry_point: str = "ModelNew",
-    verbose: bool = False,
-    gpu: str = GPU_TYPE,
-    measure_performance: bool = False,
-    num_correct_trials: int = 1,
-    num_perf_trials: int = 10,
-    timeout: int = TIMEOUT,
-):
+def main(*arglist):
     """Runs kernel evaluation using Modal."""
-
+    
+    args = sp.parse(ScriptArgs, args=arglist)
     # Use local read_file utility
     from triton_eval.utils import read_file as local_read_file
 
     console = Console()
 
     console.rule("[bold blue]Loading Source Code Locally[/bold blue]")
-    console.print(f"Loading reference source from: [cyan]{ref_src}[/cyan]")
-    console.print(f"Loading custom source from: [cyan]{custom_src}[/cyan]")
+    console.print(f"Loading reference source from: [cyan]{args.ref_src}[/cyan]")
+    console.print(f"Loading custom source from: [cyan]{args.custom_src}[/cyan]")
 
-    ref_src_code = local_read_file(ref_src)
-    custom_src_code = local_read_file(custom_src)
+    ref_src_code = local_read_file(args.ref_src)
+    custom_src_code = local_read_file(args.custom_src)
 
     if not ref_src_code or not custom_src_code:
         console.print("[bold red]Error:[/bold red] Failed to read one or both source files locally.")
         exit(1)
 
     console.rule("[bold blue]Preparing Modal Evaluation[/bold blue]")
-    console.print(f"Targeting Modal GPU: [yellow]{gpu}[/yellow]")
-    console.print(f"Timeout set to: [yellow]{timeout}s[/yellow]")
+    console.print(f"Targeting Modal GPU: [yellow]{args.gpu}[/yellow]")
+    console.print(f"Timeout set to: [yellow]{args.timeout}s[/yellow]")
 
     console.rule("[bold green]Starting Modal Evaluation Remotely[/bold green]")
     try:
-        eval_result = ModalEvaluator.with_options(gpu=gpu, timeout=timeout)().run_evaluation.remote(
+        eval_result = ModalEvaluator.with_options(gpu=args.gpu, timeout=args.timeout)().run_evaluation.remote(
             ref_src_code=ref_src_code,
             custom_src_code=custom_src_code,
-            ref_entry_point=ref_entry_point,
-            custom_entry_point=custom_entry_point,
-            num_correct_trials=num_correct_trials,
-            num_perf_trials=num_perf_trials,
-            verbose=verbose,
-            measure_performance=measure_performance,
+            ref_entry_point=args.ref_entry_point,
+            custom_entry_point=args.custom_entry_point,
+            num_correct_trials=args.num_correct_trials,
+            num_perf_trials=args.num_perf_trials,
+            verbose=args.verbose,
+            measure_performance=args.measure_performance,
         )
     except Exception as e:
         # Catch Modal-specific exceptions if needed, or general ones
