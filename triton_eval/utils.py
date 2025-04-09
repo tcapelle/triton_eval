@@ -11,10 +11,22 @@ def to_device(x, device: torch.device):
         return [to_device(v, device) for v in x]
     return x
 
-def set_gpu_arch(arch_list: list[str]):
+
+
+def set_gpu_arch(gpu: str="h100"):
     """
     Set env variable for torch cuda arch list to build kernels for specified architectures
     """
+
+    gpu_arch_mapping = {
+        "l40s": ["Ada"],
+        "h100": ["Hopper"],
+        "a100": ["Ampere"],
+        "l4": ["Ada"],
+        "t4": ["Turing"],
+        "a10g": ["Ampere"],
+    }
+    arch_list = gpu_arch_mapping[gpu.lower()]
     valid_archs = ["Maxwell", "Pascal", "Volta", "Turing", "Ampere", "Hopper", "Ada"]
     for arch in arch_list:
         if arch not in valid_archs:

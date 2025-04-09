@@ -88,17 +88,10 @@ def test_set_gpu_arch(monkeypatch):
 
     try:
         # Valid case
-        valid_archs = ["Ampere", "Hopper"]
-        set_gpu_arch(valid_archs)
-        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "Ampere;Hopper"
+        gpu = "h100"
+        set_gpu_arch(gpu)
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "Hopper"
 
-        # Invalid case
-        invalid_archs = ["Pascal", "InvalidArchName"]
-        with pytest.raises(ValueError, match="Invalid architecture: InvalidArchName.*"): # check regex
-            set_gpu_arch(invalid_archs)
-
-        # Ensure env var wasn't changed by the invalid call (it should still be from the valid call)
-        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "Ampere;Hopper"
 
     finally:
         # Restore original value or unset

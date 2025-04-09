@@ -7,7 +7,7 @@ from triton_eval.eval import (
     register_and_format_exception,
     _parse_inputs,
 )
-
+from triton_eval.utils import set_gpu_arch
 # --- Global Constants and Setup ---
 CUDA_IS_AVAILABLE = torch.cuda.is_available()
 
@@ -32,6 +32,7 @@ except FileNotFoundError:
 @pytest.mark.skipif(original_model_src is None or custom_model_src is None, reason="Test data files not found")
 def test_cuda_add_kernel_evaluation():
     """Test basic eval_kernel_against_ref: compilation and correctness."""
+    set_gpu_arch()
     eval_result = eval_kernel_against_ref(
         original_model_src=original_model_src,
         custom_model_src=custom_model_src,

@@ -6,7 +6,7 @@ from rich.pretty import pprint
 import os
 
 # Import the utility function
-from triton_eval.utils import read_file
+from triton_eval.utils import read_file, set_gpu_arch
 from triton_eval.eval import eval_kernel_against_ref, detect_backend
 
 """
@@ -25,7 +25,7 @@ class ScriptArgs:
     custom_entry_point: str = "ModelNew"  # Class name of the custom nn.Module
     device: str = "cuda:0"  # CUDA device to run on (e.g., 'cuda:0')
     verbose: bool = False  # Enable verbose output during evaluation
-    measure_performance: bool = False  # Measure kernel performance
+    measure_performance: bool = True  # Measure kernel performance
     num_correct_trials: int = 1  # Number of trials for correctness checking
     num_perf_trials: int = 10  # Number of trials for performance measurement
     build_dir_prefix: str = "/tmp/triton_eval_builds"  # Prefix for build directories
@@ -77,9 +77,8 @@ def main():
         shutil.rmtree(build_dir, ignore_errors=True)
     os.makedirs(build_dir, exist_ok=True)
 
-
+    set_gpu_arch()
     console.rule("[bold green]Starting Evaluation[/bold green]")
-
     eval_result = eval_kernel_against_ref(
         original_model_src=ref_src_code,
         custom_model_src=custom_src_code,
