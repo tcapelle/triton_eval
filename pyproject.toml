@@ -13,6 +13,7 @@ dependencies = [
     "rich",
     "simple_parsing",
     "modal>=0.73.153",
+    "datasets>=3.5.0",
 ]
 
 [tool.uv.sources]
