@@ -10,7 +10,6 @@ modal run scripts/run_and_check_modal.py --ref-src tests/test_data/cuda/model_ex
 modal run scripts/run_and_check_modal.py --ref-src tests/test_data/triton/embed_code.py --custom-src tests/test_data/triton/embed_triton.py --ref-entry-point LinearEmbedding --custom-entry-point LinearEmbeddingNew --gpu H100 --measure-performance
 
 """
-import simple_parsing as sp
 from dataclasses import dataclass, field
 import torch
 from rich.console import Console
@@ -20,6 +19,7 @@ import modal
 
 
 GPU_TYPE = "H100!"
+TIMEOUT = 60
 
 # Configure Modal image
 cuda_version = "12.6.0"
@@ -30,10 +30,9 @@ tag = f"{cuda_version}-{flavor}-{operating_sys}"
 image = (
     modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python="3.10")
     .pip_install(
-        "simple_parsing", # Keep for local parsing if needed outside main
+        "simple_parsing",
         "rich",
-        "torch", # Ensure torch is available in the Modal environment
-        # Add other direct dependencies if needed
+        "torch",
     )
     .add_local_python_source("triton_eval")
 )
@@ -120,7 +119,7 @@ def main(
     measure_performance: bool = False,
     num_correct_trials: int = 1,
     num_perf_trials: int = 10,
-    timeout: int = 600,
+    timeout: int = TIMEOUT,
 ):
     """Runs kernel evaluation using Modal."""
 
