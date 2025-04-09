@@ -28,6 +28,7 @@ ENV/
 env.bak/
 venv.bak/
 .python-version
+.vscode/
 
 # PyTorch
 *.pt
