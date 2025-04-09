@@ -2,19 +2,14 @@
 Helpers for Evaluations
 """
 
-from contextlib import redirect_stdout, redirect_stderr
-from io import StringIO
-import json
 import importlib
 import numpy as np
 import os
-import shutil
 import subprocess
 import tempfile
 import torch
 import torch.nn as nn
 from pydantic import BaseModel
-# import ast # No longer needed
 
 from triton_eval.utils import to_device
 
@@ -80,7 +75,48 @@ def load_reference_model_and_inputs(
 
     return (ModelClass, get_init_inputs_fn, get_inputs_fn)
 
-def load_custom_model_with_tempfile(model_custom_src, entry_point="ModelNew"):
+
+def load_custom_cuda_model(
+    model_custom_src: str, entry_point: str, context: dict, build_directory: str = None
+) -> nn.Module:
+    """
+    Load class from custom NN.module pytorch code
+    this is the code output by LLM with calls to custom cuda kernels
+
+    Args:
+        model_custom_src: The source code string of the custom model.
+        entry_point: The name of the nn.Module class to load.
+        context: The execution context (dictionary) for the source code.
+        build_directory: Optional path to the build directory for extensions.
+    """
+    if build_directory:
+        context["BUILD_DIRECTORY"] = build_directory
+        # Add import at the start of the source code
+        model_custom_src = (
+            "import os\n" f"os.environ['TORCH_EXTENSIONS_DIR'] = '{build_directory}'\n"
+        ) + model_custom_src
+
+    try:
+        compile(model_custom_src, "<string>", "exec")
+        exec(model_custom_src, context)
+        # DANGER: need to delete refernece from global namespace
+    except SyntaxError as e:
+        print(f"Syntax Error in custom generated code or Compilation Error {e}")
+        return None
+    except Exception as e: # Catch other execution errors
+        print(f"Error executing custom code: {e}")
+        return None
+
+    # Get the class using the provided entry point name
+    ModelClass = context.get(entry_point)
+    if not ModelClass:
+        print(f"Error: Class '{entry_point}' not found in context after executing custom source.")
+        return None
+
+    return ModelClass
+
+
+def load_custom_triton_model(model_custom_src, entry_point="ModelNew"):
     """
     Writes the provided Python code string to a temporary .py file,
     dynamically imports the module so we can access the modified model class.
@@ -141,45 +177,6 @@ def load_custom_model_with_tempfile(model_custom_src, entry_point="ModelNew"):
 
         return None, None # Return None for both model and tempfile
 
-def load_custom_model(
-    model_custom_src: str, entry_point: str, context: dict, build_directory: str = None
-) -> nn.Module:
-    """
-    Load class from custom NN.module pytorch code
-    this is the code output by LLM with calls to custom cuda kernels
-
-    Args:
-        model_custom_src: The source code string of the custom model.
-        entry_point: The name of the nn.Module class to load.
-        context: The execution context (dictionary) for the source code.
-        build_directory: Optional path to the build directory for extensions.
-    """
-    if build_directory:
-        context["BUILD_DIRECTORY"] = build_directory
-        # Add import at the start of the source code
-        model_custom_src = (
-            "import os\n" f"os.environ['TORCH_EXTENSIONS_DIR'] = '{build_directory}'\n"
-        ) + model_custom_src
-
-    try:
-        compile(model_custom_src, "<string>", "exec")
-        exec(model_custom_src, context)
-        # DANGER: need to delete refernece from global namespace
-    except SyntaxError as e:
-        print(f"Syntax Error in custom generated code or Compilation Error {e}")
-        return None
-    except Exception as e: # Catch other execution errors
-        print(f"Error executing custom code: {e}")
-        return None
-
-    # Get the class using the provided entry point name
-    ModelClass = context.get(entry_point)
-    if not ModelClass:
-        print(f"Error: Class '{entry_point}' not found in context after executing custom source.")
-        return None
-
-    return ModelClass
-
 
 def graceful_eval_cleanup(
     curr_context: dict,
@@ -203,46 +200,6 @@ def graceful_eval_cleanup(
     if tempfile:
         tempfile.close()
     return True
-
-
-def build_compile_cache_with_capturing(
-    custom_model_src: str, verbose: bool = False, build_dir: os.PathLike = None
-) -> tuple[int, str, str]:
-    """
-    Write a temporary python file to compile the custom model on CPU
-    Captures the return code, stdout, and stderr
-    This works for capturing, build_compile_cache does not
-    """
-    if build_dir:
-        # Add import at the start of the source code
-        custom_model_src = (
-            "import os\n" f"os.environ['TORCH_EXTENSIONS_DIR'] = '{build_dir}'\n"
-        ) + custom_model_src
-
-    kernel_hash = hash(custom_model_src)
-    # tmp is a temp python file we write to for compilation
-    tmp = os.path.join(build_dir, f"tmp_{kernel_hash}.py")
-    os.makedirs(os.path.dirname(tmp), exist_ok=True)
-
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(custom_model_src)
-
-    # Execute the temporary Python file and capture output
-    process = subprocess.Popen(
-        ["python", tmp], stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-    stdout, stderr = process.communicate()
-    returncode = process.returncode
-
-    # Clean up temporary file
-    os.remove(tmp)
-
-    if verbose:
-        print("[CPU Precompile] return code: ", returncode)
-        print("[CPU Precompile] stdout: \n", stdout.decode("utf-8"))
-        print("[CPU Precompile] stderr: \n", stderr.decode("utf-8"))
-
-    return returncode, stdout.decode("utf-8"), stderr.decode("utf-8")
 
 
 def _parse_inputs(inputs_raw: list | tuple, device: torch.device) -> tuple[list, dict]:
@@ -361,7 +318,7 @@ def eval_kernel_against_ref(
         tempfile = None
         # add hash for later to distinguish between multi-turn kernels
         if is_triton:
-            ModelNew, tempfile = load_custom_model_with_tempfile(
+            ModelNew, tempfile = load_custom_triton_model(
                 custom_model_src, custom_entry_point
             )
             if ModelNew is None: # Check if loading failed
@@ -369,7 +326,7 @@ def eval_kernel_against_ref(
                  graceful_eval_cleanup(context, device, tempfile) # Cleanup even if tempfile might be None
                  return KernelExecResult(compiled=False, metadata=metadata) # Indicate failure
         else:
-            ModelNew = load_custom_model(custom_model_src, custom_entry_point, context, build_dir)
+            ModelNew = load_custom_cuda_model(custom_model_src, custom_entry_point, context, build_dir)
         torch.cuda.synchronize(device=device)  # not sure if this is too much
     except Exception as e:
         print(
@@ -528,8 +485,6 @@ def time_execution_with_cuda_event(
         List of elapsed times in milliseconds
     """
     if device is None:
-        if verbose:
-            print(f"Using current device: {torch.cuda.current_device()}")
         device = torch.cuda.current_device()
 
     # Warm ups
