@@ -15,6 +15,9 @@ dependencies = [
     "simple_parsing",
     "modal>=0.73.153",
     "datasets>=3.5.0",
+    "openai>=1.72.0",
+    "weave>=0.51.42",
+    "smolagents>=1.13.0",
 ]
 
 [tool.uv.sources]

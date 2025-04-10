@@ -2,17 +2,18 @@ import os
 from pathlib import Path
 import subprocess
 import uuid
-from typing import Union, Optional
+from typing import Union
 
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
 
-def run_python_file(file_path: str, env: Optional[dict[str, str]] = None) -> dict[str, Union[int, str]]:
+def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Union[int, str]]:
     """
     Executes a Python script at the given file path and captures its output.
 
     Args:
         file_path: The path to the Python file to execute.
+        env: Optional dictionary of environment variables to add/override.
 
     Returns:
         A dictionary containing:
@@ -20,11 +21,17 @@ def run_python_file(file_path: str, env: Optional[dict[str, str]] = None) -> dic
         - 'output': The standard output (stdout) if successful,
                     or standard error (stderr) if an error occurred.
     """
+    print(f"Running: `python {file_path}`")
+    # Create a copy of the current environment and update it with provided env vars
+    current_env = os.environ.copy()
+    if env:
+        current_env.update(env)
+
     result = subprocess.run(
         ["python", file_path],
         capture_output=True,
         text=True,
-        env=env
+        env=current_env  # Use the merged environment
     )
     if result.returncode != 0:
         print(f"Error running {file_path}:")
@@ -78,20 +85,23 @@ def clear_temp_files():
         os.remove(file_path)
 
 
-def run_python_code(code: str, env: Optional[dict[str, str]] = None) -> dict[str, Union[int, str]]:
-    """
-    Saves the provided Python code to a temporary file, executes it,
-    and returns the result including status code and output.
+def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[int, str]]:
+    """Executes a snippet of Python code.
 
     Args:
         code: The Python code string to execute.
-
-    Returns:
-        A dictionary containing:
-        - 'status_code': The exit code of the script (0 for success).
-        - 'output': The standard output (stdout) if successful,
-                    or standard error (stderr) if an error occurred.
+        env: Optional dictionary of environment variables.
     """
+    if env is None:
+        env = {}
     file_path = save_to_temp_file(code)
     # The run_python_file function now returns the dictionary directly
     return run_python_file(file_path, env)
+
+TOOLS = [
+    run_python_code,
+    save_to_file,
+    read_file,
+    save_to_temp_file,
+    clear_temp_files
+]
