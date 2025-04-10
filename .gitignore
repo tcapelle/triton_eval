@@ -45,3 +45,5 @@ wandb/
 *.cuh
 
 .vscode/
+data/
+temp_files/
