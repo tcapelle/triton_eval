@@ -62,7 +62,7 @@ class Agent(BaseModel):
         new_messages.append(response_message.model_dump(exclude_none=True))
         if response_message.tool_calls:
             new_messages.extend(
-                perform_tool_calls(self.tools, response_message.tool_calls)
+                perform_tool_calls(self.tools, response_message.tool_calls, self.silent)
             )
 
         new_history = state.messages + new_messages
@@ -95,7 +95,7 @@ def session(agent: Agent, agent_state: AgentState):
     if not agent.silent:
         Console.welcome(f"Using model: {agent.model_name}")
     while True:
-        result = agent.run(agent_state)
+        result = agent.run(agent_state, max_runtime_seconds=300)
         agent_state = result["state"]
         if result["stop_reason"]:
             break

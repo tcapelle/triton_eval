@@ -119,7 +119,7 @@ def get_tool(tools: list[Callable], name: str) -> Callable:
 
 
 def perform_tool_calls(
-    tools: list[Callable], tool_calls: list[ChatCompletionMessageToolCall]
+    tools: list[Callable], tool_calls: list[ChatCompletionMessageToolCall], silent: bool = False
 ) -> list[dict]:
     messages = []
     for tool_call in tool_calls:
@@ -128,7 +128,8 @@ def perform_tool_calls(
         function_args = {}
         function_response = None
         tool_call_s = f"{function_name}({tool_call.function.arguments})"
-        Console.tool_call_start(tool_call_s)
+        if not silent:
+            Console.tool_call_start(tool_call_s)
         try:
             function_args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError as e:
@@ -149,7 +150,8 @@ def perform_tool_calls(
         else:
             function_response = str(function_response)
 
-        Console.tool_call_complete(function_response)
+        if not silent:
+            Console.tool_call_complete(function_response)
         messages.append(
             {
                 "tool_call_id": tool_call.id,

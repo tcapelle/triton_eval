@@ -3,10 +3,12 @@ from pathlib import Path
 import subprocess
 import uuid
 from typing import Union
+import weave
 
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
 
+@weave.op
 def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Union[int, str]]:
     """
     Executes a Python script at the given file path and captures its output.
@@ -38,6 +40,7 @@ def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Uni
         return {"status_code": result.returncode, "output": result.stderr}
     return {"status_code": 0, "output": result.stdout}
 
+@weave.op
 def save_to_file(file_path: str, content: str):
     """
     Writes the given content to a file at the specified path.
@@ -50,6 +53,7 @@ def save_to_file(file_path: str, content: str):
     with open(file_path, "w") as f:
         f.write(content)
 
+@weave.op
 def read_file(file_path: str) -> str:
     """
     Reads the entire content of a file at the specified path.
@@ -62,7 +66,8 @@ def read_file(file_path: str) -> str:
     """
     with open(file_path, "r") as f:
         return f.read()
-    
+
+@weave.op
 def save_to_temp_file(content: str) -> str:
     """
     Saves the given content to a temporary Python file with a unique name.
@@ -77,6 +82,7 @@ def save_to_temp_file(content: str) -> str:
     save_to_file(file_path, content)
     return str(file_path) # Ensure the path is returned as a string
 
+@weave.op
 def clear_temp_files():
     """
     Deletes all files currently present in the designated temporary files directory.
@@ -85,6 +91,7 @@ def clear_temp_files():
         os.remove(file_path)
 
 
+@weave.op
 def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[int, str]]:
     """Executes a snippet of Python code.
 
@@ -98,10 +105,20 @@ def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[in
     # The run_python_file function now returns the dictionary directly
     return run_python_file(file_path, env)
 
+@weave.op
+def think(thought: str) -> str:
+    """Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. Use it when complex reasoning or some cache memory is needed.
+
+    Args:
+        thought: A thought to think about.
+    """
+    return thought
+
 TOOLS = [
     run_python_code,
     save_to_file,
     read_file,
     save_to_temp_file,
-    clear_temp_files
+    clear_temp_files,
+    think,
 ]
