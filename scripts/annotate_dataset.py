@@ -110,22 +110,28 @@ Instructions:
 
 def fix_code(row):
     if row["test_cuda_passing"]:
-        pass
-    pytorch_code = row["pytorch_code_with_test_cases"]
-    try:
-        agent = Agent(system_message=system_prompt, tools=TOOLS)
-        agent_state = AgentState(
-            messages=[{"role": "user", 
-                    "content": f"Here is the code that needs fixing:\n#Code:\n{pytorch_code}"}]) 
+        return row
+    else:
+        pytorch_code = row["pytorch_code_with_test_cases"]
+        try:
+            agent = Agent(system_message=system_prompt, tools=TOOLS, silent=True)
+            agent_state = AgentState(
+                messages=[{"role": "user", 
+                        "content": f"Here is the code that needs fixing:\n#Code:\n{pytorch_code}"}]) 
 
-        session(agent, agent_state)
-    except Exception as e:
-        print(f"Error: {e}")
-        return {"pytorch_code_with_test_cases": pytorch_code, "test_cuda_passing": False, "fixed": False}
-    return {"pytorch_code_with_test_cases": agent_state.messages[-1]["content"], "test_cuda_passing": True, "fixed": True}
+            session(agent, agent_state)
+        except Exception as e:
+            print(f"Error: {e}")
+            return {"fixed": False}
+        return {"pytorch_code_with_test_cases_fixed": agent_state.messages[-1]["content"], "test_cuda_passing": True, "fixed": True}
+
+
+
+@weave.op
+def fix_test_cases(dataset):
+    dataset = dataset.map(fix_code, num_proc=20)
+    dataset.save_to_disk("annotated_dataset_o3_fixed")
+    dataset.push_to_hub("tcapelle/annotated_dataset_o3")
 
 dataset = load_dataset("tcapelle/annotated_dataset_o3", split="train")
-
-dataset = dataset.map(fix_code, num_proc=1)
-dataset.save_to_disk("annotated_dataset_o3_fixed")
-dataset.push_to_hub("tcapelle/annotated_dataset_o3")
+fix_test_cases(dataset)
