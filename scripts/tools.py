@@ -2,11 +2,12 @@ import os
 from pathlib import Path
 import subprocess
 import uuid
-from typing import Dict, Union
+from typing import Union, Optional
+
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
 
-def run_python_file(file_path: str) -> Dict[str, Union[int, str]]:
+def run_python_file(file_path: str, env: Optional[dict[str, str]] = None) -> dict[str, Union[int, str]]:
     """
     Executes a Python script at the given file path and captures its output.
 
@@ -22,7 +23,8 @@ def run_python_file(file_path: str) -> Dict[str, Union[int, str]]:
     result = subprocess.run(
         ["python", file_path],
         capture_output=True,
-        text=True
+        text=True,
+        env=env
     )
     if result.returncode != 0:
         print(f"Error running {file_path}:")
@@ -76,7 +78,7 @@ def clear_temp_files():
         os.remove(file_path)
 
 
-def run_python_code(code: str) -> Dict[str, Union[int, str]]:
+def run_python_code(code: str, env: Optional[dict[str, str]] = None) -> dict[str, Union[int, str]]:
     """
     Saves the provided Python code to a temporary file, executes it,
     and returns the result including status code and output.
@@ -92,4 +94,4 @@ def run_python_code(code: str) -> Dict[str, Union[int, str]]:
     """
     file_path = save_to_temp_file(code)
     # The run_python_file function now returns the dictionary directly
-    return run_python_file(file_path)
+    return run_python_file(file_path, env)
