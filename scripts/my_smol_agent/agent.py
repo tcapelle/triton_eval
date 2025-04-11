@@ -11,6 +11,8 @@ import litellm
 class AgentState(BaseModel):
     # The chat message history.
     messages: list[Any] = Field(default_factory=list)
+    num_steps: int = Field(default=0)
+    max_ctx: int = Field(default=128_000)
 
 class AgentResponse(BaseModel):
     final_response: Any = Field(description="The final response from the agent, either string or validated model.")
@@ -50,6 +52,7 @@ class Agent(BaseModel):
             timeout=60,
             response_format=response_format,
         )
+
         response_message = response.choices[0].message
 
         if response_message.content and not self.silent:
@@ -64,10 +67,10 @@ class Agent(BaseModel):
 
         new_history = state.messages + new_messages
 
-        return AgentState(messages=new_history)
+        return AgentState(messages=new_history, num_steps=state.num_steps + 1)
 
     @weave.op
-    def run(self, user_prompt: str, max_runtime_seconds: int = -1):
+    def run(self, user_prompt: str, max_runtime_seconds: int = -1, max_steps: int = -1):
         if not self.silent:
             Console.welcome(f"Using model: {self.model_name}\nTools: {self.tools}")
         state = AgentState(
@@ -83,6 +86,9 @@ class Agent(BaseModel):
         start_time = time.time()
         
         while True:
+            if max_steps > 0 and state.num_steps >= max_steps:
+                print(f"Max steps reached: {max_steps}")
+                return AgentResponse(final_response=state.messages[-1]["content"], stop_reason="max_steps_reached")
             last_message = state.messages[-1]
             if last_message["role"] == "assistant" and "tool_calls" not in last_message:
                 if self.response_format is not None:

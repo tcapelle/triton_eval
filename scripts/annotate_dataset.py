@@ -123,7 +123,7 @@ def fix_code(row):
     else:
         try:
             agent = Agent(system_message=system_prompt, silent=True, response_format=TestedPytorchCode)
-            agent_response = agent.run(user_prompt=f"Here is the code that needs fixing:\n#Code:\n{pytorch_code}")
+            agent_response = agent.run(user_prompt=f"Here is the code that needs fixing:\n#Code:\n{pytorch_code}", max_steps=7)
             tested_pytorch_code = agent_response.final_response
         except Exception as e:
             print(f"Error: {e}")
