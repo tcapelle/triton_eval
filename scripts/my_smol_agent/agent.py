@@ -77,7 +77,7 @@ class Agent(BaseModel):
     @weave.op
     def run(self, user_prompt: str, max_runtime_seconds: int = -1):
         if not self.silent:
-            Console.welcome(f"Using model: {self.model_name}")
+            Console.welcome(f"Using model: {self.model_name}\nTools: {self.tools}")
         state = AgentState(
             messages=[
                 {"role": "user", 
