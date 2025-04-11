@@ -8,6 +8,8 @@ from my_smol_agent.tools import DEFAULT_TOOLS
 from my_smol_agent.tool_calling import chat_call_tool_params, perform_tool_calls
 import litellm
 
+litellm.drop_params = True
+
 class AgentState(BaseModel):
     # The chat message history.
     messages: list[Any] = Field(default_factory=list)
