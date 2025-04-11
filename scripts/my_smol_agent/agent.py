@@ -2,7 +2,6 @@ import time
 from pydantic import BaseModel, Field
 from typing import Any, Type
 import weave
-from weave.flow.chat_util import OpenAIStream
 
 from my_smol_agent.console import Console
 from my_smol_agent.tools import DEFAULT_TOOLS
@@ -25,7 +24,7 @@ class Agent(BaseModel):
     silent: bool = False
     response_format: Type[BaseModel] | None = Field(default=None)
 
-    @weave.op()
+    @weave.op
     def step(self, state: AgentState, response_format: BaseModel | None = None) -> AgentState:
         if not self.silent:
             Console.step_start("agent", "green")
@@ -82,6 +81,7 @@ class Agent(BaseModel):
                 Console.user_prompt(state.messages[0]["content"])
         
         start_time = time.time()
+        
         while True:
             last_message = state.messages[-1]
             if last_message["role"] == "assistant" and "tool_calls" not in last_message:
@@ -96,5 +96,3 @@ class Agent(BaseModel):
                 and time.time() - start_time > max_runtime_seconds
             ):
                 return AgentResponse(final_response=last_message["content"], stop_reason="time_limit_exceeded")
-    
-

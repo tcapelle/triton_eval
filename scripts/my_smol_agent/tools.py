@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import uuid
@@ -62,8 +63,11 @@ def read_file(file_path: str) -> str:
     Returns:
         The content of the file as a string.
     """
-    with open(file_path, "r") as f:
-        return f.read()
+    try:
+        with open(file_path, "r") as f:
+            return f.read()
+    except FileNotFoundError as e:
+        return f"FileNotFoundError: {file_path}"
 
 @weave.op
 def save_to_temp_file(content: str) -> str:
@@ -85,8 +89,9 @@ def clear_temp_files():
     """
     Deletes all files currently present in the designated temporary files directory.
     """
-    for file_path in TEMP_FILES_DIR.glob("*"):
-        os.remove(file_path)
+    if TEMP_FILES_DIR.exists():
+        shutil.rmtree(TEMP_FILES_DIR)
+        TEMP_FILES_DIR.mkdir(exist_ok=True)
 
 
 @weave.op
@@ -117,6 +122,5 @@ DEFAULT_TOOLS = [
     save_to_file,
     read_file,
     save_to_temp_file,
-    clear_temp_files,
     think,
 ]
