@@ -23,7 +23,6 @@ def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Uni
         - 'output': The standard output (stdout) if successful,
                     or standard error (stderr) if an error occurred.
     """
-    print(f"Running: `python {file_path}`")
     # Create a copy of the current environment and update it with provided env vars
     current_env = os.environ.copy()
     if env:
@@ -36,7 +35,6 @@ def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Uni
         env=current_env  # Use the merged environment
     )
     if result.returncode != 0:
-        print(f"Error running {file_path}:")
         return {"status_code": result.returncode, "output": result.stderr}
     return {"status_code": 0, "output": result.stdout}
 
@@ -114,7 +112,7 @@ def think(thought: str) -> str:
     """
     return thought
 
-TOOLS = [
+DEFAULT_TOOLS = [
     run_python_code,
     save_to_file,
     read_file,

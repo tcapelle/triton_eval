@@ -5,6 +5,7 @@ import weave
 from weave.flow.chat_util import OpenAIStream
 
 from my_smol_agent.console import Console
+from my_smol_agent.tools import DEFAULT_TOOLS
 from my_smol_agent.tool_calling import chat_call_tool_params, perform_tool_calls
 import litellm
 
@@ -12,13 +13,17 @@ class AgentState(BaseModel):
     # The chat message history.
     messages: list[Any] = Field(default_factory=list)
 
+class AgentResponse(BaseModel):
+    final_response: str = Field(description="The final response from the agent.")
+    stop_reason: str = Field(description="The reason the agent stopped.")
+
 class Agent(BaseModel):
     model_name: str = "gpt-4o"
     temperature: float = 0.0
     system_message: str = "You are a helpful assistant that can help with code."
-    tools: list[Any] = Field(default_factory=list)
+    tools: list[Any] = Field(default=DEFAULT_TOOLS)
     silent: bool = False
-    
+
     @weave.op()
     def step(self, state: AgentState) -> AgentState:
         if not self.silent:
@@ -69,8 +74,15 @@ class Agent(BaseModel):
 
         return AgentState(messages=new_history)
 
-    @weave.op()
-    def run(self, state: AgentState, max_runtime_seconds: int = -1):
+    @weave.op
+    def run(self, user_prompt: str, max_runtime_seconds: int = -1):
+        if not self.silent:
+            Console.welcome(f"Using model: {self.model_name}")
+        state = AgentState(
+            messages=[
+                {"role": "user", 
+                 "content": user_prompt}]) 
+
         # Print initial user prompt if available
         if state.messages and state.messages[0]["role"] == "user":
             if not self.silent:
@@ -80,26 +92,12 @@ class Agent(BaseModel):
         while True:
             last_message = state.messages[-1]
             if last_message["role"] == "assistant" and "tool_calls" not in last_message:
-                return {"state": state, "stop_reason": "done"}
+                return AgentResponse(final_response=last_message["content"], stop_reason="done")
             state = self.step(state)
             if (
                 max_runtime_seconds > 0
                 and time.time() - start_time > max_runtime_seconds
             ):
-                return {"state": state, "stop_reason": "time_limit_exceeded"}
-            
-
-
-@weave.op
-def session(agent: Agent, agent_state: AgentState):
-    if not agent.silent:
-        Console.welcome(f"Using model: {agent.model_name}")
-    while True:
-        result = agent.run(agent_state, max_runtime_seconds=300)
-        agent_state = result["state"]
-        if result["stop_reason"]:
-            break
-        else:
-            print(result["stop_reason"])
-
+                return AgentResponse(final_response=last_message["content"], stop_reason="time_limit_exceeded")
+    
 
