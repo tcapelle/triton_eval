@@ -1,6 +1,6 @@
 import time
 from pydantic import BaseModel, Field
-from typing import Any
+from typing import Any, Type
 import weave
 from weave.flow.chat_util import OpenAIStream
 
@@ -14,7 +14,7 @@ class AgentState(BaseModel):
     messages: list[Any] = Field(default_factory=list)
 
 class AgentResponse(BaseModel):
-    final_response: str = Field(description="The final response from the agent.")
+    final_response: Any = Field(description="The final response from the agent, either string or validated model.")
     stop_reason: str = Field(description="The reason the agent stopped.")
 
 class Agent(BaseModel):
@@ -23,9 +23,10 @@ class Agent(BaseModel):
     system_message: str = "You are a helpful assistant that can help with code."
     tools: list[Any] = Field(default=DEFAULT_TOOLS)
     silent: bool = False
+    response_format: Type[BaseModel] | None = Field(default=None)
 
     @weave.op()
-    def step(self, state: AgentState) -> AgentState:
+    def step(self, state: AgentState, response_format: BaseModel | None = None) -> AgentState:
         if not self.silent:
             Console.step_start("agent", "green")
 
@@ -41,29 +42,21 @@ class Agent(BaseModel):
 
         if not self.silent:
             Console.chat_response_start()
-        stream = litellm.completion(
+        response = litellm.completion(
             model=self.model_name,
             temperature=self.temperature,
             messages=messages,
             tools=tools,
-            stream=True,
+            stream=False,
             timeout=60,
+            response_format=response_format,
         )
-        wrapped_stream = OpenAIStream(stream)  # type: ignore
-        for chunk in wrapped_stream:
-            if chunk.choices[0].delta.content:
-                if not self.silent:
-                    Console.chat_message_content_delta(chunk.choices[0].delta.content)
-
-        response = wrapped_stream.final_response()
         response_message = response.choices[0].message
-        if response_message.content:
-             if not self.silent:
-                Console.chat_response_complete(response_message.content)
+
+        if response_message.content and not self.silent:
+            Console.chat_response(response_message.content)
 
         new_messages = []
-        # we always store the dict representations of messages in agent state
-        # instead of mixing in some pydantic objects.
         new_messages.append(response_message.model_dump(exclude_none=True))
         if response_message.tool_calls:
             new_messages.extend(
@@ -92,6 +85,10 @@ class Agent(BaseModel):
         while True:
             last_message = state.messages[-1]
             if last_message["role"] == "assistant" and "tool_calls" not in last_message:
+                if self.response_format is not None:
+                    state = self.step(state, self.response_format)
+                    formatted_model = self.response_format.model_validate_json(state.messages[-1]["content"])
+                    return AgentResponse(final_response=formatted_model, stop_reason="done")
                 return AgentResponse(final_response=last_message["content"], stop_reason="done")
             state = self.step(state)
             if (

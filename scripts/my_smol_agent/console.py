@@ -34,6 +34,10 @@ class Console:
         console.print("\n")
 
     @staticmethod
+    def chat_response(agent_response: str) -> None:
+        console.print(f"[bold cyan]{agent_response}\n")
+
+    @staticmethod
     def tool_call_start(tool_call: str) -> None:
         console.print(f"[bold yellow]Tool call: [/bold yellow]{tool_call}\n")
 
