@@ -242,9 +242,32 @@ Run the code to make sure the tests well integrated before returning the code.
 """
 
 
+system_prompt = """Role: You are an expert developer with deep expertise in Triton kernels and PyTorch implementations. Your primary objective is to:
+1.	Set a global device standard:
+	-	Add a global variable at the top of your script:
+    ```py
+    DEVICE = 'cuda:0'
+    ```
+    - Ensure every PyTorch tensor created explicitly uses device=DEVICE.
+2.	Execute Side-by-Side Validation:
+	-	Run both provided implementations (the Triton kernel and its corresponding PyTorch implementation) on identical input test cases, all on CUDA (DEVICE).
+	-	Make sure to print the `test_results` dictionary for both implementations side-by-side for easy comparison.
+3.	Ground Truth:
+	-	Treat outputs from the Triton kernel as the ground truth.
+	-	If discrepancies occur, only modify the PyTorch implementation minimally until outputs exactly match Triton kernel results.
+	-	Explicitly comment on all changes made, stating precisely why they were required.
+4.	Code Cleanup & Consistency:
+	-	Format Triton kernel and PyTorch implementation identically.
+	-	Maintain consistency in commenting style and clarity.
+	-	Remove unnecessary commented code, redundant imports, print statements or unused variables.
+5.	Integration & Testing:
+	-   Separate the Code and the tests by a line of `########################`
+    -   Retain PyTorch testing style, encapsulating all test cases within a single function named: `test_<kernel_function_name>()`
+    -   Store all test results in a dictionary (e.g., results["test_case_n"]).
+    -   Do not include an if __name__ == "__main__": section.
 
-
-
+Return both the triton and pytorch code with the tests integrated. Also output the `test_results` dictionary for both implementations side-by-side for easy comparison.
+"""
 # weave.init("mini-agent2")
 
 
@@ -258,26 +281,33 @@ Run the code to make sure the tests well integrated before returning the code.
 
 def fix_code(row):
 
-    class TestedTritonCode(BaseModel):
-        code_runs: bool = Field(description="Whether the code runs or not.")
+    class PytorchTritonCode(BaseModel):
+        outputs_match: bool = Field(description="Whether the outputs of the pytorch code and the triton code match.")
+        pytorch_output: str = Field(description="The output of the pytorch code.")
+        triton_output: str = Field(description="The output of the triton code.")
+        pytorch_code: str = Field(description="The pytorch code with the tests. No ```python or ``` needed, just the code.")
         triton_code: str = Field(description="The cleaned up Triton code with tests. No ```python or ``` needed, just the code.")
     
-    triton_code = row["input"]
+    triton_code = row["triton_code_with_tests"]
     pytorch_code = row["pytorch_code_with_test_cases_fixed"]
     # if row["test_cuda_passing"]:
     #     return {"pytorch_code_with_test_cases_fixed": pytorch_code, "test_cuda_passing": True, "fixed": False}
     # else:
     try:
-        agent = Agent(model_name="o3-mini", system_message=system_prompt, silent=True, response_format=TestedTritonCode)
-        agent_response = agent.run(user_prompt=f"Here is the triton code:\n{triton_code}\n\nHere is the pytorch code with the tests:\n{pytorch_code}", max_steps=12)
+        agent = Agent(model_name="o3-mini", system_message=system_prompt, silent=True, response_format=PytorchTritonCode)
+        agent_response = agent.run(
+            user_prompt=f"Here is the triton code:\n{triton_code}\n\nHere is the pytorch code with the tests:\n{pytorch_code}", max_steps=20)
         res = agent_response.final_response
-        res = {"triton_code_with_tests": res.triton_code, 
-                "triton_cuda_passing": res.code_runs}
+        res = {"final_triton_code": res.triton_code, 
+                "final_pytorch_code": res.pytorch_code,
+                "outputs_match": res.outputs_match,
+                "pytorch_output": res.pytorch_output,
+                "triton_output": res.triton_output}
         print(f"=============== Fixed code ==========================")
         return res
     except Exception as e:
         print(f"Error: {e}")
-        return {"triton_code_with_tests": None, "triton_cuda_passing": False}
+        return {"final_triton_code": None, "final_pytorch_code": None, "outputs_match": None, "pytorch_output": None, "triton_output": None}
 
 
 # # iterative fix
@@ -299,7 +329,7 @@ dataset = load_dataset("tcapelle/annotated_dataset_o3", split="train")
 
 dataset = dataset.map(fix_code, num_proc=6)
 dataset.save_to_disk("annotated_dataset_o3_fixed")
-dataset.push_to_hub("tcapelle/annotated_dataset_o3", commit_message="triton with tests")
+dataset.push_to_hub("tcapelle/annotated_dataset_o3", commit_message="Triton vs PyTorch")
 
 
 # # from datasets import Dataset

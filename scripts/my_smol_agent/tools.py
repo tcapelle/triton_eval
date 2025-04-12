@@ -69,7 +69,6 @@ def read_file(file_path: str) -> str:
     except FileNotFoundError as e:
         return f"FileNotFoundError: {file_path}"
 
-@weave.op
 def save_to_temp_file(content: str) -> str:
     """
     Saves the given content to a temporary Python file with a unique name.
@@ -121,6 +120,5 @@ DEFAULT_TOOLS = [
     run_python_code,
     save_to_file,
     read_file,
-    save_to_temp_file,
     think,
 ]
