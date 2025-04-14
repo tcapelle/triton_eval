@@ -18,6 +18,7 @@ dependencies = [
     "openai>=1.72.0",
     "weave>=0.51.42",
     "smolagents>=1.13.0",
+    "ipykernel>=6.29.5",
 ]
 
 [tool.uv.sources]
