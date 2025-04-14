@@ -242,7 +242,7 @@ Run the code to make sure the tests well integrated before returning the code.
 """
 
 
-system_prompt = """Role: You are an expert developer with deep expertise in Triton kernels and PyTorch implementations. Your primary objective is to:
+system_prompt = """You are an expert developer with deep expertise in Triton kernels and PyTorch implementations. Your primary objective is to:
 1.	Set a global device standard:
 	-	Add a global variable at the top of your scripts:
     ```py
@@ -325,13 +325,14 @@ This is really important if we want to compare the 2 implementations in the futu
 
 You have to make sure that the pytorch and triton code are equivalent and can be used interchangeably. This is the purpose of triton kernels, to replace the pytorch code.
 """
+
 # weave.init("mini-agent2")
 
 def fix_code(row):
 
     class PytorchTritonCode(BaseModel):
-        pytorch_code: str = Field(description="The pytorch code with the tests. No ```python or ``` needed, just the code.")
-        triton_code: str = Field(description="The cleaned up Triton code with tests. No ```python or ``` needed, just the code.")
+        pytorch_code: str = Field(description="The pytorch file with the tests. No ```python or ``` needed, just the code.")
+        triton_code: str = Field(description="The Triton file with the tests. No ```python or ``` needed, just the code.")
         # pytorch_output: str = Field(description="The output of the pytorch code, it should be the output of the tests.")
         # triton_output: str = Field(description="The output of the triton code, it should be the output of the tests.")
     
@@ -351,34 +352,33 @@ def fix_code(row):
         return {"final_triton_code": None, "final_pytorch_code": None}
 
 
-# iterative fix
-from rich.progress import track
-
-@weave.op
-def fix_test_cases(dataset):
-    fixed_rows = []
-    for row in track(dataset, description="Fixing test cases"):
-        row.update(fix_code(row))
-        fixed_rows.append(row)
-
-    from datasets import Dataset
-    new_dataset = Dataset.from_list(fixed_rows)
-    return new_dataset
-        
-
-# dataset = load_dataset("tcapelle/annotated_dataset_o3", split="train", revision="4f4f465ccfb15752d701d29b2c402d80be1e9eea")
 dataset = load_dataset("tcapelle/annotated_dataset_o3", split="train")
 
-# dataset = dataset.select(range(10))
-# dataset = fix_test_cases(dataset)
-
+# apply the agent to every row of the dataset (8 at a time)
 dataset = dataset.map(fix_code, num_proc=8)
 
-
 dataset.save_to_disk("annotated_dataset_o3_fixed")
-dataset.push_to_hub("tcapelle/annotated_dataset_o3_sample", commit_message="Triton vs PyTorch")
+dataset.push_to_hub("tcapelle/annotated_dataset_o3", commit_message="Triton vs PyTorch")
 
 
 
 # # new_dataset.save_to_disk("annotated_dataset_o3_fixed")
 # # new_dataset.push_to_hub("tcapelle/annotated_dataset_o3")
+
+
+# iterative fix
+# from rich.progress import track
+
+# @weave.op
+# def fix_test_cases(dataset):
+#     fixed_rows = []
+#     for row in track(dataset, description="Fixing test cases"):
+#         row.update(fix_code(row))
+#         fixed_rows.append(row)
+
+#     from datasets import Dataset
+#     new_dataset = Dataset.from_list(fixed_rows)
+#     return new_dataset
+
+# dataset = fix_test_cases(dataset)
+
