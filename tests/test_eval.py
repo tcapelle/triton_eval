@@ -58,9 +58,6 @@ def test_get_error_name():
     except ImportError as e:
         assert get_error_name(e) == "builtins.ImportError"
 
-# Removed test_check_metadata_serializable_all_types
-
-# Removed test_set_seed
 
 def test_register_and_format_exception():
     """Test exception formatting and truncation."""
