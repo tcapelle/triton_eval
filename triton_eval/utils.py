@@ -67,9 +67,20 @@ def get_tests(script_content: str) -> str:
     return "def test_" + test_part
 
     
-def run_script_on_gpu(script_content, test_content, file_name, gpu_id=None):
+def run_script_on_gpu(script_content: str, test_content: str, file_name: str, gpu_id: int=None) -> tuple[bool, subprocess.CompletedProcess, str]:
     """
     Runs a given Python script on a specified GPU.
+
+    Args:
+        script_content: The content of the script to run.
+        test_content: The content of the test to run.
+        file_name: The name of the file to save the script to.
+        gpu_id: The ID of the GPU to run the script on.
+
+    Returns:
+        success: Whether the script ran successfully.
+        results: The results of the script.
+        file_name: The name of the file that was run.
     """
 
     temp_path = TEMP_FILES_DIR / file_name
