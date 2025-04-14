@@ -1,6 +1,14 @@
 "Some utils"
 import torch
 import os
+import subprocess
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+TEMP_FILES_DIR = Path("./temp_files")
+TEMP_FILES_DIR.mkdir(exist_ok=True)
+GPUS = list(range(torch.cuda.device_count()))
+
 
 def to_device(x, device: torch.device):
     if isinstance(x, torch.Tensor):
@@ -10,7 +18,6 @@ def to_device(x, device: torch.device):
     elif isinstance(x, list):
         return [to_device(v, device) for v in x]
     return x
-
 
 
 def set_gpu_arch(gpu: str="h100"):
@@ -48,3 +55,77 @@ def read_file(file_path: str) -> str:
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
         return ""
+
+def get_tests(script_content: str) -> str:
+    """Get test functions from script content."""
+    if "def test_" not in script_content:
+        return ""
+    
+    # Extract the part that contains test function
+    test_part = script_content.split("def test_", 1)[1]
+    # Reconstruct the function definition
+    return "def test_" + test_part
+
+    
+def run_script_on_gpu(script_content, test_content, file_name, gpu_id=None):
+    """
+    Runs a given Python script on a specified GPU.
+    """
+
+    temp_path = TEMP_FILES_DIR / file_name
+    
+
+    try:
+        with open(temp_path, "w") as temp_file:
+            temp_file.write(script_content + "\n" + "#" * 146 + "\n" + test_content)
+
+        # Set GPU device for execution
+        env = os.environ.copy()
+        if gpu_id is not None:
+            if "CUDA_VISIBLE_DEVICES" in env:
+                del env["CUDA_VISIBLE_DEVICES"]
+            if gpu_id is not None:
+                env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+        # Run the temporary Python file
+        results = subprocess.run(
+            ["python", temp_path], 
+            capture_output=True, 
+            text=True,
+            env=env
+        )
+
+        success = results.returncode == 0  # Determine if execution was successful
+
+        return success, results, file_name  # Return execution success status
+
+    finally:
+        pass
+
+def run_code_parallel(pred, test, files, gpus=GPUS):
+    """
+    Runs code in parallel across multiple GPUs, ensuring each GPU runs one script at a time.
+    """
+    total_scripts = len(pred)
+    correct_count = 0
+    ok_save_files = []
+    with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
+        future_to_file = {
+            executor.submit(run_script_on_gpu, p, t, f, TEMP_FILES_DIR, gpus[i % len(gpus)]): f
+            for i, (p, t, f) in enumerate(zip(pred, test, files))
+        }
+
+        for future in as_completed(future_to_file):
+            file_name = future_to_file[future]
+            try:
+                success = future.result()[0]
+                if success:
+                    correct_count += 1
+                    ok_save_files.append(future.result()[1])
+            except Exception as e:
+                print(f"Error processing {file_name}: {e}", flush=True)
+
+    # Calculate and print the correct execution rate
+    correct_rate = (correct_count / total_scripts) * 100
+    print(f"\nCorrect execution rate: {correct_rate:.2f}%", flush=True)
+    print(ok_save_files)

@@ -2,7 +2,8 @@ import pytest
 import torch
 import os
 import tempfile
-from triton_eval.utils import to_device, set_gpu_arch, read_file
+from pathlib import Path
+from triton_eval.utils import to_device, set_gpu_arch, read_file, get_tests, run_script_on_gpu
 
 def test_to_device():
     """Test the to_device function with various inputs and devices."""
@@ -135,3 +136,105 @@ def test_read_file(tmp_path):
                 os.chmod(unreadable_file, original_mode)
         except Exception:
             pass # Ignore cleanup errors 
+
+
+def test_get_tests():
+    """Test get_tests with a sample script."""
+    from textwrap import dedent
+
+    # Test 1: No test functions
+    script_content_no_tests = dedent("""
+        import torch
+
+        def func():
+            pass""")
+
+    expected_output = ""
+    assert get_tests(script_content_no_tests) == expected_output
+
+    # Test 2: Single test function
+    script_content_single_test = dedent("""
+        import torch
+
+        def func():
+            pass
+
+        # Test
+        def test_func():
+            pass""")
+    
+    expected_single_test = dedent("""
+        def test_func():
+            pass""").strip()
+    assert get_tests(script_content_single_test) == expected_single_test
+
+    # Test 3: Multiple test functions
+    script_content_multiple_tests = dedent("""
+        import torch
+
+        def func():
+            pass
+
+        def test_func():
+            pass
+
+        def test_func2():
+            pass""")
+    
+    expected_multiple_tests = dedent("""
+        def test_func():
+            pass
+
+        def test_func2():
+            pass""").strip()
+    assert get_tests(script_content_multiple_tests) == expected_multiple_tests
+
+def test_run_script_on_gpu_cpu():
+    """Test run_script_on_gpu executes a simple script on CPU."""
+    script_content = "print('Hello from CPU')\nimport sys; sys.exit(0)" # Ensure clean exit
+    test_content = "# No tests needed for this simple script"
+    file_name = "cpu_script.py"
+
+    # Run on CPU (gpu_id = None)
+    success, results, returned_file_name = run_script_on_gpu(
+        script_content,
+        test_content,
+        file_name,
+        gpu_id=None,
+    )
+
+    assert success is True
+    assert returned_file_name == file_name
+    assert results.returncode == 0
+    assert results.stdout == "Hello from CPU\n"
+    assert results.stderr == ""
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_run_script_on_gpu_cuda():
+    """Test run_script_on_gpu executes a simple script on GPU 0."""
+    script_content = (
+        "import torch\n"
+        "assert torch.cuda.is_available()\n"
+        "assert torch.cuda.current_device() == 0\n"
+        "print(f'Hello from GPU: {torch.cuda.current_device()}')\n"
+        "import sys; sys.exit(0)"
+    )
+    test_content = "# No tests needed, assertions are in the script"
+    file_name = "gpu_script.py"
+    gpu_id = 0
+
+    # Run on GPU (gpu_id = 0)
+    success, results, returned_file_name = run_script_on_gpu(
+        script_content,
+        test_content,
+        file_name,
+        gpu_id=gpu_id,
+    )
+
+    assert success is True
+    assert returned_file_name == file_name
+    assert results.returncode == 0
+    assert results.stdout == "Hello from GPU: 0\n"
+    assert results.stderr == ""
+
