@@ -3,7 +3,10 @@ import torch
 import os
 import tempfile
 from pathlib import Path
-from triton_eval.utils import to_device, set_gpu_arch, read_file, get_tests, run_script_on_gpu
+from triton_eval.utils import (
+    to_device, set_gpu_arch, read_file, get_tests, run_script_on_gpu,
+    save_to_file, save_to_temp_file, ifnone, TEMP_FILES_DIR
+)
 
 def test_to_device():
     """Test the to_device function with various inputs and devices."""
@@ -137,6 +140,52 @@ def test_read_file(tmp_path):
         except Exception:
             pass # Ignore cleanup errors 
 
+def test_save_to_file(tmp_path):
+    """Test save_to_file function."""
+    content = "This is the content to save."
+    file_path = tmp_path / "test_save.txt"
+
+    # Test saving new file
+    returned_path = save_to_file(str(file_path), content)
+    assert returned_path == str(file_path)
+    assert file_path.exists()
+    assert file_path.read_text() == content
+
+    # Test overwriting existing file
+    new_content = "This is the new content."
+    returned_path_overwrite = save_to_file(str(file_path), new_content)
+    assert returned_path_overwrite == str(file_path)
+    assert file_path.read_text() == new_content
+
+def test_save_to_temp_file():
+    """Test save_to_temp_file function."""
+    content = "Temporary content here."
+    
+    # Ensure temp dir exists
+    TEMP_FILES_DIR.mkdir(exist_ok=True)
+    
+    temp_file_path_str = save_to_temp_file(content)
+    temp_file_path = Path(temp_file_path_str)
+
+    assert isinstance(temp_file_path_str, str)
+    assert temp_file_path.exists()
+    assert temp_file_path.name.endswith(".py")
+    assert temp_file_path.parent == TEMP_FILES_DIR
+    assert temp_file_path.read_text() == content
+
+    # Clean up the created temp file
+    try:
+        os.remove(temp_file_path)
+    except OSError as e:
+        print(f"Error removing temp file {temp_file_path}: {e}")
+
+def test_ifnone():
+    """Test the ifnone utility function."""
+    assert ifnone(None, "default") == "default"
+    assert ifnone("value", "default") == "value"
+    assert ifnone(0, "default") == 0
+    assert ifnone("", "default") == ""
+    assert ifnone(False, True) is False
 
 def test_get_tests():
     """Test get_tests with a sample script."""
@@ -196,18 +245,18 @@ def test_run_script_on_gpu_cpu():
     file_name = "cpu_script.py"
 
     # Run on CPU (gpu_id = None)
-    success, results, returned_file_name = run_script_on_gpu(
-        script_content,
-        test_content,
-        file_name,
+    run_result = run_script_on_gpu(
+        script_content=script_content,
+        test_content=test_content,
+        file_name=file_name,
         gpu_id=None,
     )
 
-    assert success is True
-    assert returned_file_name == file_name
-    assert results.returncode == 0
-    assert results.stdout == "Hello from CPU\n"
-    assert results.stderr == ""
+    assert run_result.success is True
+    assert run_result.file_name.endswith(file_name)
+    assert run_result.returncode == 0
+    assert run_result.stdout == "Hello from CPU\n"
+    assert run_result.stderr == ""
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -225,16 +274,16 @@ def test_run_script_on_gpu_cuda():
     gpu_id = 0
 
     # Run on GPU (gpu_id = 0)
-    success, results, returned_file_name = run_script_on_gpu(
-        script_content,
-        test_content,
-        file_name,
+    run_result = run_script_on_gpu(
+        script_content=script_content,
+        test_content=test_content,
+        file_name=file_name,
         gpu_id=gpu_id,
     )
 
-    assert success is True
-    assert returned_file_name == file_name
-    assert results.returncode == 0
-    assert results.stdout == "Hello from GPU: 0\n"
-    assert results.stderr == ""
+    assert run_result.success is True
+    assert run_result.file_name.endswith(file_name)
+    assert run_result.returncode == 0
+    assert run_result.stdout == "Hello from GPU: 0\n"
+    assert run_result.stderr == ""
 

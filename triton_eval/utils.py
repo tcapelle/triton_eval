@@ -99,8 +99,10 @@ def get_tests(script_content: str) -> str:
 
 class RunResult(BaseModel):
     success: bool
-    results: subprocess.CompletedProcess | None
-    file_name: str
+    returncode: int | None
+    stdout: str | None
+    stderr: str | None
+    file_name: str | None
 
 def ifnone(x, default):
     return x if x is not None else default
@@ -147,10 +149,24 @@ def run_script_on_gpu(script_content: str, test_content: str | None=None, file_n
 
         success = results.returncode == 0  # Determine if execution was successful
 
-        return RunResult(success=success, results=results, file_name=file_name)  # Return execution success status
+        # Return execution success status and details
+        return RunResult(
+            success=success, 
+            returncode=results.returncode, 
+            stdout=results.stdout, 
+            stderr=results.stderr, 
+            file_name=file_path # Return the actual path used
+        )
 
     except Exception as e:
-        return RunResult(success=False, results=None, file_name=file_name)
+        # Return failure status and error details
+        return RunResult(
+            success=False, 
+            returncode=None, 
+            stdout=None, 
+            stderr=str(e), 
+            file_name=file_name # Return the original filename passed
+        )
 
 def run_code_parallel(pred, test, files, gpus=GPUS):
     """
@@ -161,19 +177,22 @@ def run_code_parallel(pred, test, files, gpus=GPUS):
     ok_save_files = []
     with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
         future_to_file = {
-            executor.submit(run_script_on_gpu, p, t, f, TEMP_FILES_DIR, gpus[i % len(gpus)]): f
+            executor.submit(run_script_on_gpu, script_content=p, test_content=t, file_name=f, gpu_id=gpus[i % len(gpus)]): f
             for i, (p, t, f) in enumerate(zip(pred, test, files))
         }
 
         for future in as_completed(future_to_file):
             file_name = future_to_file[future]
             try:
-                success = future.result()[0]
-                if success:
+                run_result = future.result()
+                if run_result.success:
                     correct_count += 1
-                    ok_save_files.append(future.result()[1])
+                    ok_save_files.append(run_result.file_name)
+                # Optional: Add more detailed error logging if needed
+                # else:
+                #     print(f"Script {file_name} failed. Stderr:\\n{run_result.stderr}", flush=True)
             except Exception as e:
-                print(f"Error processing {file_name}: {e}", flush=True)
+                print(f"Error processing future for {file_name}: {e}", flush=True)
 
     # Calculate and print the correct execution rate
     correct_rate = (correct_count / total_scripts) * 100
