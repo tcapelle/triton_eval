@@ -1,8 +1,10 @@
 "Some utils"
 import torch
 import os
+import uuid
 import subprocess
 from pathlib import Path
+from pydantic import BaseModel
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 TEMP_FILES_DIR = Path("./temp_files")
@@ -55,6 +57,34 @@ def read_file(file_path: str) -> str:
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
         return ""
+    
+def save_to_file(file_path: str, content: str):
+    """
+    Writes the given content to a file at the specified path.
+    If the file exists, it will be overwritten.
+
+    Args:
+        file_path: The path of the file to write to.
+        content: The string content to write to the file.
+    """
+    with open(file_path, "w") as f:
+        f.write(content)
+    return file_path
+
+def save_to_temp_file(content: str) -> str:
+    """
+    Saves the given content to a temporary Python file with a unique name.
+
+    Args:
+        content: The string content to write to the temporary file.
+
+    Returns:
+        The path to the newly created temporary file.
+    """
+    TEMP_FILES_DIR.mkdir(exist_ok=True)
+    file_path = TEMP_FILES_DIR / f"{uuid.uuid4()}.py"
+    save_to_file(file_path, content)
+    return str(file_path) # Ensure the path is returned as a string
 
 def get_tests(script_content: str) -> str:
     """Get test functions from script content."""
@@ -66,8 +96,16 @@ def get_tests(script_content: str) -> str:
     # Reconstruct the function definition
     return "def test_" + test_part
 
-    
-def run_script_on_gpu(script_content: str, test_content: str, file_name: str, gpu_id: int=None) -> tuple[bool, subprocess.CompletedProcess, str]:
+
+class RunResult(BaseModel):
+    success: bool
+    results: subprocess.CompletedProcess | None
+    file_name: str
+
+def ifnone(x, default):
+    return x if x is not None else default
+
+def run_script_on_gpu(script_content: str, test_content: str | None=None, file_name: str | None=None, gpu_id: int|None=None) -> RunResult:
     """
     Runs a given Python script on a specified GPU.
 
@@ -82,13 +120,14 @@ def run_script_on_gpu(script_content: str, test_content: str, file_name: str, gp
         results: The results of the script.
         file_name: The name of the file that was run.
     """
-
-    temp_path = TEMP_FILES_DIR / file_name
-    
+    test_content = ifnone(test_content, "")
+    content = script_content + "\n" + "#" * 146 + "\n" + test_content
 
     try:
-        with open(temp_path, "w") as temp_file:
-            temp_file.write(script_content + "\n" + "#" * 146 + "\n" + test_content)
+        if file_name is None:
+            file_path = save_to_temp_file(content)
+        else:
+            file_path = save_to_file(file_name, content)
 
         # Set GPU device for execution
         env = os.environ.copy()
@@ -100,7 +139,7 @@ def run_script_on_gpu(script_content: str, test_content: str, file_name: str, gp
 
         # Run the temporary Python file
         results = subprocess.run(
-            ["python", temp_path], 
+            ["python", file_path], 
             capture_output=True, 
             text=True,
             env=env
@@ -108,10 +147,10 @@ def run_script_on_gpu(script_content: str, test_content: str, file_name: str, gp
 
         success = results.returncode == 0  # Determine if execution was successful
 
-        return success, results, file_name  # Return execution success status
+        return RunResult(success=success, results=results, file_name=file_name)  # Return execution success status
 
-    finally:
-        pass
+    except Exception as e:
+        return RunResult(success=False, results=None, file_name=file_name)
 
 def run_code_parallel(pred, test, files, gpus=GPUS):
     """
