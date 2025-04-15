@@ -326,39 +326,50 @@ This is really important if we want to compare the 2 implementations in the futu
 You have to make sure that the pytorch and triton code are equivalent and can be used interchangeably. This is the purpose of triton kernels, to replace the pytorch code.
 """
 
+
+system_prompt = """You are an expert developer with deep expertise in PyTorch and Triton kernels. Your task is to:
+1.	Extract the PyTorch tests from the provided code.
+2.	Return only the PyTorch tests, no other code.
+3.	Ensure the tests are formatted correctly and can be run directly.
+4.	Make sure the tests are not printing intermediate results. As you can see there is a single print statement at the end of the tests.
+This is really important if we want to compare the 2 implementations in the future.
+"""
+
+
+
+
 # weave.init("mini-agent2")
 
 def fix_code(row):
 
-    class PytorchTritonCode(BaseModel):
-        pytorch_code: str = Field(description="The pytorch file with the tests. No ```python or ``` needed, just the code.")
-        triton_code: str = Field(description="The Triton file with the tests. No ```python or ``` needed, just the code.")
+    class PytorchTests(BaseModel):
+        # pytorch_code: str = Field(description="The pytorch file with the tests. No ```python or ``` needed, just the code.")
+        # triton_code: str = Field(description="The Triton file with the tests. No ```python or ``` needed, just the code.")
         # pytorch_output: str = Field(description="The output of the pytorch code, it should be the output of the tests.")
         # triton_output: str = Field(description="The output of the triton code, it should be the output of the tests.")
-    
-    triton_code = row["final_triton_code"]
+        pytorch_tests: str = Field(description="The pytorch tests, no ```python or ``` needed, just the code.")
+    # triton_code = row["final_triton_code"]
     pytorch_code = row["final_pytorch_code"]
     try:
-        agent = Agent(model_name="o3-mini", system_message=system_prompt, silent=True, response_format=PytorchTritonCode)
+        agent = Agent(model_name="o3-mini", system_message=system_prompt, silent=True, response_format=PytorchTests)
         agent_response = agent.run(
-            user_prompt=f"Let's format these sample codes. Here is the pytorch code with the tests:\n{pytorch_code}\n\nHere is the triton code:\n{triton_code}\n\n", max_steps=20)
+            user_prompt=f"Let's format these sample codes. Here is the pytorch code with the tests:\n{pytorch_code}", max_steps=20)
         res = agent_response.final_response
-        res = {"final_triton_code": res.triton_code, 
-                "final_pytorch_code": res.pytorch_code}
+        res = {"pytorch_tests": res.pytorch_tests}
         print(f"=============== Fixed code ==========================")
         return res
     except Exception as e:
         print(f"Error: {e}")
-        return {"final_triton_code": None, "final_pytorch_code": None}
+        return {"pytorch_tests": None}
 
 
-dataset = load_dataset("tcapelle/annotated_dataset_o3", split="train")
+dataset = load_dataset("tcapelle/annotated_dataset_o3_train_pytorch_triton", split="train")
 
 # apply the agent to every row of the dataset (8 at a time)
 dataset = dataset.map(fix_code, num_proc=8)
 
-dataset.save_to_disk("annotated_dataset_o3_fixed")
-dataset.push_to_hub("tcapelle/annotated_dataset_o3", commit_message="Triton vs PyTorch")
+# dataset.save_to_disk("annotated_dataset_o3_fixed")
+dataset.push_to_hub("tcapelle/annotated_dataset_o3_train_pytorch_triton", commit_message="Extract tests from pytorch code")
 
 
 
