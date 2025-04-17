@@ -335,6 +335,22 @@ system_prompt = """You are an expert developer with deep expertise in PyTorch an
 This is really important if we want to compare the 2 implementations in the future.
 """
 
+system_prompt = """You are an expert developer with deep expertise in PyTorch. Your task is to:
+1. We have a pytorch code with some errors.
+2. You have the fixed pytorch code
+2. You havethe original errors.
+3. YOu aghve to explain what was the error and how it was fixed.
+
+Don't chanage the naming of the functions, just fix the errors.
+Make sure to preserve the structure, with a single print statement at the end of the tests.
+"""
+
+
+def compute_ds_stats(dataset, bool_col:str):
+    num_rows_total = len(dataset)
+    filtered_ds = dataset.filter(lambda x: x[bool_col])
+    num_rows = len(filtered_ds)
+    print(f"Number of rows where {bool_col} is True: {num_rows}/{num_rows_total} ({num_rows/num_rows_total*100}%)")
 
 
 
@@ -342,34 +358,46 @@ This is really important if we want to compare the 2 implementations in the futu
 
 def fix_code(row):
 
-    class PytorchTests(BaseModel):
+    class PytorchCodeWithTests(BaseModel):
         # pytorch_code: str = Field(description="The pytorch file with the tests. No ```python or ``` needed, just the code.")
         # triton_code: str = Field(description="The Triton file with the tests. No ```python or ``` needed, just the code.")
         # pytorch_output: str = Field(description="The output of the pytorch code, it should be the output of the tests.")
         # triton_output: str = Field(description="The output of the triton code, it should be the output of the tests.")
-        pytorch_tests: str = Field(description="The pytorch tests, no ```python or ``` needed, just the code.")
+        explanation: str = Field(description="A short explanation of the changes you made to the code.")
+    
     # triton_code = row["final_triton_code"]
-    pytorch_code = row["final_pytorch_code"]
+    pytorch_code = row["pytorch_code"]
+    fixed_pytorch_code = row["pytorch_code_fixed"]
+    error = row["pytorch_code_error"]
+    success = row["pytorch_code_success"]
+    fixed = row["fixed"]
     try:
-        agent = Agent(model_name="o3-mini", system_message=system_prompt, silent=True, response_format=PytorchTests)
-        agent_response = agent.run(
-            user_prompt=f"Let's format these sample codes. Here is the pytorch code with the tests:\n{pytorch_code}", max_steps=20)
-        res = agent_response.final_response
-        res = {"pytorch_tests": res.pytorch_tests}
-        print(f"=============== Fixed code ==========================")
-        return res
+        if not success and fixed:
+            agent = Agent(model_name="gpt-4.1", system_message=system_prompt, silent=True, response_format=PytorchCodeWithTests)
+            agent_response = agent.run(
+                user_prompt=f"Here is the pytorch code with the tests:\n\n{pytorch_code}\n\nError: {error}\n\n Here it is the fixed pytorch code:\n\n{fixed_pytorch_code}. Explain what was the error and how it was fixed.", max_steps=20)
+            res = agent_response.final_response
+            res = {"explanation": res.explanation}
+            print(f"=============== Fixed code ==========================")
+            print(res["explanation"])
+            return res
+        else:
+            return {"explanation": ""}
     except Exception as e:
         print(f"Error: {e}")
-        return {"pytorch_tests": None}
+        return {"explanation": ""}
 
 
-dataset = load_dataset("tcapelle/annotated_dataset_o3_train_pytorch_triton", split="train")
+dataset = load_dataset("tcapelle/dataset_wiht_pt_errors", split="train")
 
-# apply the agent to every row of the dataset (8 at a time)
-dataset = dataset.map(fix_code, num_proc=8)
+compute_ds_stats(dataset, "fixed")
+compute_ds_stats(dataset, "pytorch_code_success")
 
-# dataset.save_to_disk("annotated_dataset_o3_fixed")
-dataset.push_to_hub("tcapelle/annotated_dataset_o3_train_pytorch_triton", commit_message="Extract tests from pytorch code")
+# # apply the agent to every row of the dataset (8 at a time)
+# dataset = dataset.map(fix_code, num_proc=8)
+
+# # dataset.save_to_disk("annotated_dataset_o3_fixed")
+# dataset.push_to_hub("tcapelle/dataset_wiht_pt_errors", commit_message="Attemp fix 4.1")
 
 
 
