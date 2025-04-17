@@ -6,6 +6,9 @@ import subprocess
 import uuid
 from typing import Union
 import weave
+import io
+import contextlib
+import traceback
 
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
@@ -128,6 +131,53 @@ def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[in
     file_path = save_to_temp_file(code)
     # The run_python_file function now returns the dictionary directly
     return run_python_file(file_path, env)
+
+@weave.op
+def run_python_in_process(code: str):
+    """
+    Executes the code in the current process and captures its output.
+
+    Args:
+        code: The Python code string to execute.
+
+    Returns:
+        A dictionary containing:
+        - 'status_code': 0 for success, 1 for error.
+        - 'stdout': The captured standard output.
+        - 'stderr': The captured standard error.
+        - 'error': The error message if an exception occurred (optional).
+        - 'traceback': The traceback string if an exception occurred (optional).
+    """
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    status_code = 0
+    error_message = None
+    tb_string = None
+
+    try:
+        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+            # Execute the code in the current global/local scope.
+            # Consider passing specific globals/locals if more isolation is needed.
+            exec(code, globals(), locals())
+    except Exception as e:
+        status_code = 1
+        error_message = str(e)
+        # Capture the full traceback
+        tb_string = traceback.format_exc()
+    finally:
+        stdout_val = stdout_capture.getvalue()
+        stderr_val = stderr_capture.getvalue()
+
+        result = {
+            "status_code": status_code,
+            "stdout": stdout_val,
+            "stderr": stderr_val,
+        }
+        if error_message:
+            result["error"] = error_message
+            result["traceback"] = tb_string # Include traceback in the result
+
+        return result
 
 @weave.op
 def think(thought: str) -> str:
