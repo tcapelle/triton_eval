@@ -135,7 +135,8 @@ def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[in
 @weave.op
 def run_python_in_process(code: str):
     """
-    Executes the code in the current process and captures its output.
+    Executes the code in the current process using a separate scope
+    and captures its output.
 
     Args:
         code: The Python code string to execute.
@@ -154,17 +155,24 @@ def run_python_in_process(code: str):
     error_message = None
     tb_string = None
 
+    # Create dedicated dictionaries for globals/locals
+    # Only provide access to built-ins by default for safety.
+    # Add other necessary modules (e.g., 'math', 'torch') here if the executed code needs them.
+    exec_globals = {'__builtins__': __builtins__}
+    exec_locals = {} # Start with an empty local scope
+
     try:
         with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-            # Execute the code in the current global/local scope.
-            # Consider passing specific globals/locals if more isolation is needed.
-            exec(code, globals(), locals())
+            # Execute using the custom scope
+            exec(code, exec_globals, exec_locals)
     except Exception as e:
         status_code = 1
         error_message = str(e)
-        # Capture the full traceback
         tb_string = traceback.format_exc()
     finally:
+        # exec_globals and exec_locals now contain anything defined by the code.
+        # When this function returns, these dictionaries (and the objects
+        # they *solely* reference) become eligible for garbage collection.
         stdout_val = stdout_capture.getvalue()
         stderr_val = stderr_capture.getvalue()
 
@@ -175,7 +183,7 @@ def run_python_in_process(code: str):
         }
         if error_message:
             result["error"] = error_message
-            result["traceback"] = tb_string # Include traceback in the result
+            result["traceback"] = tb_string
 
         return result
 
