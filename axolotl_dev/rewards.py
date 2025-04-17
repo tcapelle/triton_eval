@@ -3,11 +3,11 @@ import weave
 import math
 import re
 import torch
-from concurrent.futures import ProcessPoolExecutor
 
-from tools import extract_code, extract_tests, run_python_code
+from tools import extract_code, run_python_in_process
 
-weave.init("grpo-cuda/axolotl-grpo")
+# generated deadlocks with tokenizers
+# weave.init("grpo-cuda/axolotl-grpo")
 
 AVAILABLE_GPUS = list(range(torch.cuda.device_count()))
 
@@ -79,7 +79,7 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     # Run the triton code
-    triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)})
+    triton_output = run_python_in_process(triton_and_test)
 
     match = (pytorch_code_output == triton_output["stdout"] 
              and triton_output["status_code"] == 0)
@@ -106,13 +106,9 @@ def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
     responses = [completion[0]['content'] for completion in completions]
     rewards = []
 
-    num_workers = len(AVAILABLE_GPUS) if AVAILABLE_GPUS else 1
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all tasks
-        futures = [executor.submit(run_scorer, response, tests[0], pytorch_code_output[0]) for response in responses]
+    # dummy seq run
+    run_scores = [run_scorer(response, tests[0], pytorch_code_output[0]) for response in responses]
 
-        # Collect results as they complete (maintaining order)
-        run_scores = [future.result() for future in futures]
 
     # Extract the 'match' status from each result
     rewards = [_compute_code_runs_reward(score) for score in run_scores]
