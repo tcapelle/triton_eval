@@ -59,9 +59,8 @@ def run_python_file(file_path: str, env: dict[str, str] = None, timeout: int = 6
         env=current_env,
         timeout=timeout
     )
-    if result.returncode != 0:
-        return {"status_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
-    return {"status_code": 0, "stdout": result.stdout, "stderr": result.stderr}
+
+    return {"status_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 @weave.op
 def save_to_file(file_path: str, content: str):
