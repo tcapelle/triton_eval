@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -10,7 +11,29 @@ TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
 
 @weave.op
-def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Union[int, str]]:
+def extract_code(code: str) -> str:
+    "Extract the last code block surrounded by ```python, use re"
+    pattern = r"```python(.*?)```"
+    match = re.search(pattern, code, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    else:
+        return ""
+
+@weave.op
+def remove_tests(code: str) -> str:
+    "Only works on standard test files"
+    code_without_tests = code.split("#"*146)[0]
+    return code_without_tests
+
+@weave.op
+def extract_tests(code: str) -> str:
+    "Only works on standard test files"
+    tests = code.split("#"*146)[-1]
+    return tests
+
+@weave.op
+def run_python_file(file_path: str, env: dict[str, str] = None, timeout: int = 60) -> dict[str, Union[int, str]]:
     """
     Executes a Python script at the given file path and captures its output.
 
@@ -33,11 +56,12 @@ def run_python_file(file_path: str, env: dict[str, str] = None) -> dict[str, Uni
         ["python", file_path],
         capture_output=True,
         text=True,
-        env=current_env  # Use the merged environment
+        env=current_env,
+        timeout=timeout
     )
     if result.returncode != 0:
-        return {"status_code": result.returncode, "output": result.stderr}
-    return {"status_code": 0, "output": result.stdout}
+        return {"status_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    return {"status_code": 0, "stdout": result.stdout, "stderr": result.stderr}
 
 @weave.op
 def save_to_file(file_path: str, content: str):
@@ -52,7 +76,6 @@ def save_to_file(file_path: str, content: str):
     with open(file_path, "w") as f:
         f.write(content)
 
-@weave.op
 def read_file(file_path: str) -> str:
     """
     Reads the entire content of a file at the specified path.
@@ -69,6 +92,7 @@ def read_file(file_path: str) -> str:
     except FileNotFoundError as e:
         return f"FileNotFoundError: {file_path}"
 
+@weave.op
 def save_to_temp_file(content: str) -> str:
     """
     Saves the given content to a temporary Python file with a unique name.
@@ -101,8 +125,6 @@ def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[in
         code: The Python code string to execute.
         env: Optional dictionary of environment variables.
     """
-    if env is None:
-        env = {}
     file_path = save_to_temp_file(code)
     # The run_python_file function now returns the dictionary directly
     return run_python_file(file_path, env)
