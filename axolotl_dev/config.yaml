@@ -22,8 +22,15 @@ trl:
     - rewards.think_reward
     - rewards.one_code_blob_reward
     - rewards.reward_code_runs
+    - rewards.imports_decorator_reward
+    - rewards.constexpr_reward
+    - rewards.valid_tl_methods_reward
+    - rewards.masks_load_store_reward
+    - rewards.torch_empty_penalty
+    - rewards.torch_zeros_reward
+  reward_weights:
   vllm_gpu_memory_utilization: 0.9
-  vllm_max_model_len: 2048
+  # vllm_max_model_len: 4096 # May be useful for big models/small GPUs
   num_generations: 14
 
 chat_template: qwen_25
@@ -32,7 +39,7 @@ datasets:
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
-output_dir: /workspace/data/axolotl-artifacts/r1-outputs
+output_dir: /workspace/data/axolotl-artifacts/grpo-beta-zero
 
 dataloader_prefetch_factor: 32
 dataloader_num_workers: 2
@@ -51,7 +58,7 @@ wandb_name: grpo-beta-zero
 
 gradient_accumulation_steps: 8
 micro_batch_size: 2  # should match num_generations / num_gpus
-num_epochs: 1
+num_epochs: 5
 
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
@@ -70,4 +77,4 @@ flash_attention: true
 logging_steps: 1
 warmup_steps: 100
 evals_per_epoch: 1
-saves_per_epoch: 4
+saves_per_epoch: 1
