@@ -9,6 +9,9 @@ import weave
 import io
 import contextlib
 import traceback
+import importlib.util
+import tempfile
+import sys
 
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
@@ -135,7 +138,7 @@ def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[in
 @weave.op
 def run_python_in_process(code: str):
     """
-    Executes the code in the current process using a separate scope
+    Executes the code in the current process using a separate module namespace
     and captures its output.
 
     Args:
@@ -155,37 +158,53 @@ def run_python_in_process(code: str):
     error_message = None
     tb_string = None
 
-    # Create dedicated dictionaries for globals/locals
-    # Only provide access to built-ins by default for safety.
-    # Add other necessary modules (e.g., 'math', 'torch') here if the executed code needs them.
-    exec_globals = {'__builtins__': __builtins__}
-    exec_locals = {} # Start with an empty local scope
-
+    temp_file_path = None # Initialize to None
     try:
+        # Use the existing function to save the code to a temporary file
+        temp_file_path = save_to_temp_file(code)
+
         with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-            # Execute using the custom scope
-            exec(code, exec_globals, exec_locals)
+            # Create a module specification pointing to our temp file
+            # Use a unique module name based on UUID to avoid conflicts
+            module_name = f"temp_module_{uuid.uuid4().hex}"
+            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not create module spec for {temp_file_path}")
+
+            # Create a new module based on that spec
+            temp_module = importlib.util.module_from_spec(spec)
+            # Add necessary builtins or other modules if needed
+            # temp_module.__dict__.update({'__builtins__': __builtins__})
+
+            # Execute the code in the module's namespace
+            spec.loader.exec_module(temp_module)
+
     except Exception as e:
         status_code = 1
         error_message = str(e)
         tb_string = traceback.format_exc()
     finally:
-        # exec_globals and exec_locals now contain anything defined by the code.
-        # When this function returns, these dictionaries (and the objects
-        # they *solely* reference) become eligible for garbage collection.
-        stdout_val = stdout_capture.getvalue()
-        stderr_val = stderr_capture.getvalue()
+        # Ensure the temporary file is deleted if it was created
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except OSError as e:
+                pass
 
-        result = {
-            "status_code": status_code,
-            "stdout": stdout_val,
-            "stderr": stderr_val,
-        }
-        if error_message:
-            result["error"] = error_message
-            result["traceback"] = tb_string
+    # Capture output after execution
+    stdout_val = stdout_capture.getvalue()
+    stderr_val = stderr_capture.getvalue()
 
-        return result
+    result = {
+        "status_code": status_code,
+        "stdout": stdout_val,
+        "stderr": stderr_val,
+    }
+    if error_message:
+        result["error"] = error_message
+        result["traceback"] = tb_string
+
+    return result
 
 @weave.op
 def think(thought: str) -> str:
