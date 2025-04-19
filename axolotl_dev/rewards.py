@@ -4,7 +4,12 @@ import math
 import re
 import torch
 
-from tools import extract_code, run_python_in_process
+if torch.distributed.get_rank() == 0:
+    weave.init("grpo-cuda/axolotl-grpo")
+
+RUN_SAFE = True
+
+from tools import extract_code, run_python_in_process, run_python_code
 
 # generated deadlocks with tokenizers
 # weave.init("grpo-cuda/axolotl-grpo")
@@ -63,7 +68,7 @@ def think_reward(completions, **kwargs):
     for response in responses:
         think_score = think_scorer(response)
         ok = think_score["thinking_ok"]
-        reward = 0.5 * math.exp(-think_score["thinking_length"]/1000) if ok else -1
+        reward = 0.2 * math.exp(-think_score["thinking_length"]/1000) if ok else -0.2
         rewards.append(reward)
     return rewards
 
@@ -91,7 +96,7 @@ def one_code_blob_reward(completions, **kwargs):
     for response in responses:
         code_blob_score = one_code_blob(response)
         ok = code_blob_score["one_code_blob_ok"]
-        reward = 1 * math.exp(-code_blob_score["code_length"]/1000) if ok else -1
+        reward = 0.2 * math.exp(-code_blob_score["code_length"]/1000) if ok else -0.2
         rewards.append(reward)
     return rewards
 
@@ -103,10 +108,15 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
     gpu_id = random.choice(AVAILABLE_GPUS)
 
     triton_code = extract_code(output)
+    if len(triton_code) < 10:
+        return {"triton_runs": False, "pt_runs": True, "match": False}
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     # Run the triton code
-    triton_output = run_python_in_process(triton_and_test)
+    if RUN_SAFE:
+        triton_output = run_python_code(triton_and_test)
+    else:
+        triton_output = run_python_in_process(triton_and_test)
 
     match = (pytorch_code_output == triton_output["stdout"] 
              and triton_output["status_code"] == 0)
@@ -121,11 +131,11 @@ def _compute_code_runs_reward(run_output):
     pt_runs = run_output["pt_runs"]
     match = run_output["match"]
     if not triton_runs or not pt_runs:
-        return -1
+        return -0.25
     elif not match:
-        return 0
+        return 0.2
     else:
-        return 1
+        return 0.5
 
 @weave.op
 def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
