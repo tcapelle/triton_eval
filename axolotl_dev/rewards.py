@@ -68,14 +68,17 @@ def think_reward(completions, **kwargs):
     for response in responses:
         think_score = think_scorer(response)
         ok = think_score["thinking_ok"]
-        reward = 0.2 * math.exp(-think_score["thinking_length"]/1000) if ok else -0.2
+        reward = 0.2 * math.exp(-think_score["thinking_length"]/1000) if ok else -0.1
         rewards.append(reward)
     return rewards
 
 @weave.op
 def one_code_blob(output):
-    "Check if the output has exactly one Python code blob"
-    code_blobs = re.findall(r"```python(.*?)```", output, re.DOTALL)
+    "Check if the output has exactly one Python code blob after removing the think block"
+    # Remove the think block first
+    output_without_think = re.sub(r"<think>.*?</think>", "", output, flags=re.DOTALL).strip()
+
+    code_blobs = re.findall(r"```python(.*?)```", output_without_think, re.DOTALL)
 
     num_matches = len(code_blobs)
     one_code_blob_ok = False
@@ -90,12 +93,14 @@ def one_code_blob(output):
     return {"one_code_blob_ok": one_code_blob_ok, "code_length": code_length}
 
 def one_code_blob_reward(completions, **kwargs):
-    "Reward the model for having a single code blob"
+    "Reward the model for having a single code blob after the think block"
     responses = [completion[0]['content'] for completion in completions]
     rewards = []
     for response in responses:
+        # The scorer now handles removing the think block internally
         code_blob_score = one_code_blob(response)
         ok = code_blob_score["one_code_blob_ok"]
+        # Penalize more heavily if no code blob found after removing think
         reward = 0.2 * math.exp(-code_blob_score["code_length"]/1000) if ok else -0.2
         rewards.append(reward)
     return rewards
@@ -128,9 +133,8 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
 def _compute_code_runs_reward(run_output):
     "If the code doesn't run, renturn -1, it if runs but doesn't match, return 0, otherwise return 1"
     triton_runs = run_output["triton_runs"]
-    pt_runs = run_output["pt_runs"]
     match = run_output["match"]
-    if not triton_runs or not pt_runs:
+    if not triton_runs:
         return -0.25
     elif not match:
         return 0.2
