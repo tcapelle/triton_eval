@@ -13,17 +13,34 @@ from my_smol_agent.tools import remove_tests, extract_code, extract_tests, run_p
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
+
+
 console = Console()
 
 client = openai.OpenAI(
     base_url="http://0.0.0.0:8000/v1",
 )
 
-MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
+
 # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+
 
 TEMPERATURE = 0.0
-AVAILABLE_GPUS = [1, 2, 3, 4, 5, 6, 7]
+TIMEOUT = 60
+AVAILABLE_GPUS = [4, 5, 6, 7]
+
+@dataclass
+class ScriptArgs:
+    trials: int = 1
+    model_name: str = MODEL_NAME
+    temperature: float = TEMPERATURE
+    max_tokens: int = 3000
+    weave_project: str = "grpo-cuda/triton-bench"
+    weave_dataset: str = "Tritonbench_T:v0"
+    debug: bool = False
 
 system_prompt = """
 You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters. 
@@ -50,6 +67,34 @@ thinking process
 code
 ```"""
 
+## TRAINING PROMPT ###########################
+system_prompt = """
+You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters. 
+
+# Instructions
+- Ensure that the wrapper function fully corresponds to the provided function information.
+- Generate a detailed plan on how to convert and optimize the Pytorch code to a Triton kernel before writing the code.
+- The reasoning process MUST BE enclosed within <think> and </think> tags."
+- Reply with the thinking process and a single blob of code surrounded with ```python and ```.
+"""
+
+user_prompt = """Convert the following PyTorch code to a Triton kernel.
+Pytorch code:
+```python
+{pt_code}```
+
+The function should have the same name as the PyTorch function. 
+
+Don't forget to format your answer as:
+<think>
+thinking process
+</think>
+```python
+code
+```"""
+
+##############################################
+
 
 def call_model(system_prompt: str, user_prompt: str, model_name: str = MODEL_NAME, temperature: float = TEMPERATURE, **model_kwargs):
     response = client.chat.completions.create(
@@ -69,6 +114,7 @@ class QwenCode(weave.Model):
     "this is just a pydantic BaseModel subclass"
     model_name: str
     temperature: float
+    max_tokens: int = 3000
     system_prompt: str
     user_prompt: str
 
@@ -82,7 +128,7 @@ class QwenCode(weave.Model):
             self.user_prompt.format(pt_code=code), 
             self.model_name, 
             self.temperature,
-            max_tokens=3000,
+            max_tokens=self.max_tokens,
             )
         return out
     
@@ -99,15 +145,15 @@ def run_scorer(output, pt_code):
 
     # run pt code
     gpu_id = random.choice(AVAILABLE_GPUS)
-    pt_output = run_python_code(pt_code, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)})
+    pt_output = run_python_code(pt_code, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
 
     triton_code = extract_code(output)
     tests = extract_tests(pt_code)
 
-    triton_and_test = f"import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}"
+    triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     # Run the triton code
-    triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)})
+    triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
 
     match = pt_output["stdout"] == triton_output["stdout"] and pt_output["status_code"] == 0 and triton_output["status_code"] == 0
 
@@ -151,15 +197,6 @@ def one_code_blob(output):
 
 scorers = [run_scorer, think_scorer, one_code_blob]
 
-@dataclass
-class ScriptArgs:
-    trials: int = 1
-    model_name: str = MODEL_NAME
-    temperature: float = TEMPERATURE
-    weave_project: str = "grpo-cuda/triton-bench"
-    weave_dataset: str = "Tritonbench_T:v0"
-    debug: bool = False
-
 if __name__ == "__main__":
     console.rule("[bold green]Running Weave Eval[/bold green]")
 
@@ -176,6 +213,7 @@ if __name__ == "__main__":
     qwen = QwenCode(
         model_name=args.model_name,
         temperature=args.temperature,
+        max_tokens=args.max_tokens,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
     )
