@@ -32,7 +32,7 @@ trl:
   reward_weights:
   vllm_gpu_memory_utilization: 0.9
   # vllm_max_model_len: 4096 # May be useful for big models/small GPUs
-  num_generations: 14
+  num_generations: 12
 
 chat_template: qwen_25
 datasets:
@@ -57,8 +57,8 @@ wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
 wandb_name: grpo-beta-zero
 
-gradient_accumulation_steps: 8
-micro_batch_size: 2  # should match num_generations / num_gpus
+gradient_accumulation_steps: 2
+micro_batch_size: 8  # should match num_generations / num_gpus
 num_epochs: 5
 
 optimizer: adamw_torch_fused
@@ -70,7 +70,7 @@ weight_decay: 0.01
 bf16: true
 tf32: true
 
-gradient_checkpointing: true
+gradient_checkpointing: False
 gradient_checkpointing_kwargs:
   use_reentrant: false
 flash_attention: true
