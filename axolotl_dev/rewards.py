@@ -111,6 +111,9 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
     assert isinstance(tests, str), f"tests is not a string: {tests}"
     # run pt code
     gpu_id = random.choice(AVAILABLE_GPUS)
+    env = {
+        "CUDA_VISIBLE_DEVICES": str(gpu_id),
+    }
 
     triton_code = extract_code(output)
     if len(triton_code) < 10:
@@ -119,9 +122,9 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
 
     # Run the triton code
     if RUN_SAFE:
-        triton_output = run_python_code(triton_and_test)
+        triton_output = run_python_code(triton_and_test, env)
     else:
-        triton_output = run_python_in_process(triton_and_test)
+        triton_output = run_python_in_process(triton_and_test, env)
 
     match = (pytorch_code_output == triton_output["stdout"] 
              and triton_output["status_code"] == 0)

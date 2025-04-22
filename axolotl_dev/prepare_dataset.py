@@ -1,8 +1,8 @@
 from datasets import load_dataset
 from dataclasses import dataclass
 import simple_parsing as sp
-
-from tools import extract_tests
+import re
+from rich.pretty import pprint
 
 @dataclass
 class Args:
@@ -35,6 +35,15 @@ thinking process
 code
 ```"""
 
+def split_at_tests(code: str, entrypoint: str) -> tuple[str, str]:
+    test_name = f"test_{entrypoint}"
+    if test_name not in code:
+        return code, ""
+    import re
+    code_without_tests = re.split(f"def {test_name}", code)[0]
+    tests = f"def {test_name}" + re.split(f"def {test_name}", code)[1] 
+    return code_without_tests, tests
+
 def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
     # Load the dataset - this is expected to be preprocessed by prepare_dataset.py
     data = load_dataset(dataset_name)[split]
@@ -45,12 +54,14 @@ def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
     def format_example(example):
         # Format the prompt with the preprocessed code
         pytorch_code = example[code_column]
-        tests = extract_tests(pytorch_code)
+        entrypoint = example["entrypoint"]
+        code_without_tests, tests = split_at_tests(pytorch_code, entrypoint)
         return {
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT.format(pytorch_code=pytorch_code)}
+                {"role": "user", "content": USER_PROMPT.format(pytorch_code=code_without_tests)}
             ],
+            "pt_code_without_tests": code_without_tests,
             "tests": tests
         }
     
@@ -65,4 +76,9 @@ def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
 if __name__ == "__main__":
     args = sp.parse(Args)
     dataset = get_dataset(args.dataset_name, "train", args.code_column)
-    dataset.save_to_disk("train_dataset")
+    # dataset.save_to_disk("train_dataset")
+    dataset.push_to_hub("tcapelle/train_ds_triton", commit_message="push prepared")
+    pprint(dataset[0]["tests"])
+    print("-"*100)
+    pprint(dataset[0]["pt_code_without_tests"])
+    print(len(dataset))
