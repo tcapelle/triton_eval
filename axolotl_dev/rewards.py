@@ -17,6 +17,24 @@ from tools import extract_code, run_python_in_process, run_python_code
 
 AVAILABLE_GPUS = list(range(torch.cuda.device_count()))
 
+# ===== Reward Magnitudes =====
+# Centralized dictionary for reward/penalty values
+REWARD_MAGNITUDES = {
+    "think_ok": 0.2,
+    "think_not_ok": -0.1,
+    "one_code_blob_ok": 0.2,
+    "one_code_blob_not_ok": -0.2,
+    "code_runs_fail": -0.25,
+    "code_runs_mismatch": 0.2,
+    "code_runs_match": 0.5,
+    "imports_decorator_ok": 0.2,
+    "constexpr_ok": 0.2,
+    "valid_tl_methods_ok": 0.2,
+    "masks_load_store_ok": 0.1,
+    "torch_empty_penalty": -0.1,
+    "torch_zeros_ok": 0.1,
+}
+
 # List of valid triton.language methods
 # Sourced from triton.__dir__() and filtering for relevant functions
 tl_methods = [
@@ -68,9 +86,10 @@ def think_reward(completions, **kwargs):
     rewards = []
     for response in responses:
         think_score = think_scorer(response)
+        ok = think_score["thinking_ok"]
         thinking_length = think_score["thinking_length"]
         thinking_length = max(thinking_length - 5000, 0)
-        reward = 0.2 * math.exp(-thinking_length/1000) if ok else -0.1
+        reward = REWARD_MAGNITUDES["think_ok"] * math.exp(-thinking_length/1000) if ok else REWARD_MAGNITUDES["think_not_ok"]
         rewards.append(reward)
     return rewards
 
@@ -103,7 +122,7 @@ def one_code_blob_reward(completions, **kwargs):
         code_blob_score = one_code_blob(response)
         ok = code_blob_score["one_code_blob_ok"]
         # Penalize more heavily if no code blob found after removing think
-        reward = 0.2 * math.exp(-code_blob_score["code_length"]/1000) if ok else -0.2
+        reward = REWARD_MAGNITUDES["one_code_blob_ok"] * math.exp(-code_blob_score["code_length"]/1000) if ok else REWARD_MAGNITUDES["one_code_blob_not_ok"]
         rewards.append(reward)
     return rewards
 
@@ -143,11 +162,11 @@ def _compute_code_runs_reward(run_output):
     triton_runs = run_output["triton_runs"]
     match = run_output["match"]
     if not triton_runs:
-        return -0.25
+        return REWARD_MAGNITUDES["code_runs_fail"]
     elif not match:
-        return 0.2
+        return REWARD_MAGNITUDES["code_runs_mismatch"]
     else:
-        return 0.5
+        return REWARD_MAGNITUDES["code_runs_match"]
 
 @weave.op
 def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
@@ -189,7 +208,7 @@ def imports_decorator_reward(completions, **kwargs):
             rewards.append(0) # Penalize lack of code elsewhere
             continue
         score = imports_decorator_scorer(triton_code)
-        rewards.append(0.2 if score["imports_decorator_ok"] else 0)
+        rewards.append(REWARD_MAGNITUDES["imports_decorator_ok"] if score["imports_decorator_ok"] else 0)
     return rewards
 
 @weave.op
@@ -208,7 +227,7 @@ def constexpr_reward(completions, **kwargs):
             rewards.append(0)
             continue
         score = constexpr_scorer(triton_code)
-        rewards.append(0.2 if score["uses_constexpr"] else 0)
+        rewards.append(REWARD_MAGNITUDES["constexpr_ok"] if score["uses_constexpr"] else 0)
     return rewards
 
 @weave.op
@@ -237,7 +256,7 @@ def valid_tl_methods_reward(completions, **kwargs):
             rewards.append(0)
             continue
         score = valid_tl_methods_scorer(triton_code)
-        rewards.append(0.2 if score["all_tl_methods_valid"] else 0)
+        rewards.append(REWARD_MAGNITUDES["valid_tl_methods_ok"] if score["all_tl_methods_valid"] else 0)
     return rewards
 
 @weave.op
@@ -273,7 +292,7 @@ def masks_load_store_reward(completions, **kwargs):
             rewards.append(0)
             continue
         score = masks_load_store_scorer(triton_code)
-        rewards.append(0.1 if score["uses_mask_load_store"] else 0)
+        rewards.append(REWARD_MAGNITUDES["masks_load_store_ok"] if score["uses_mask_load_store"] else 0)
     return rewards
 
 @weave.op
@@ -294,7 +313,7 @@ def torch_empty_penalty(completions, **kwargs):
         # Check only within the kernel function definition if possible?
         # For now, check the whole extracted code blob.
         score = torch_empty_scorer(triton_code)
-        rewards.append(-0.1 if score["uses_torch_empty"] else 0)
+        rewards.append(REWARD_MAGNITUDES["torch_empty_penalty"] if score["uses_torch_empty"] else 0)
     return rewards
 
 @weave.op
@@ -314,5 +333,5 @@ def torch_zeros_reward(completions, **kwargs):
             continue
         # Similar to torch.empty, ideally check only in entrypoint.
         score = torch_zeros_scorer(triton_code)
-        rewards.append(0.1 if score["uses_torch_zeros"] else 0)
+        rewards.append(REWARD_MAGNITUDES["torch_zeros_ok"] if score["uses_torch_zeros"] else 0)
     return rewards
