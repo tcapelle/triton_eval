@@ -20,9 +20,9 @@ TEMP_FILES_DIR.mkdir(exist_ok=True)
 def extract_code(code: str) -> str:
     "Extract the last code block surrounded by ```python, use re"
     pattern = r"```python(.*?)```"
-    match = re.search(pattern, code, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    matches = re.findall(pattern, code, re.DOTALL)
+    if matches:
+        return matches[-1].strip()
     else:
         return ""
 
@@ -57,19 +57,16 @@ def run_python_file(file_path: str, env: dict[str, str] = None, timeout: int = 6
     current_env = os.environ.copy()
     if env:
         current_env.update(env)
-    try:
-        result = subprocess.run(
-            ["python", file_path],
-            capture_output=True,
-            text=True,
-            env=current_env,
-            timeout=timeout
-        )
-        if result.returncode != 0:
-            return {"status_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
-        return {"status_code": 0, "stdout": result.stdout, "stderr": result.stderr}
-    except Exception as e:
-        return {"status_code": 1, "stdout": str(e), "stderr": ""}
+    result = subprocess.run(
+        ["python", file_path],
+        capture_output=True,
+        text=True,
+        env=current_env,
+        timeout=timeout
+    )
+    if result.returncode != 0:
+        return {"status_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    return {"status_code": 0, "stdout": result.stdout, "stderr": result.stderr}
 
 @weave.op
 def save_to_file(file_path: str, content: str):

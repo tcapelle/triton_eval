@@ -37,11 +37,12 @@ code
 
 def split_at_tests(code: str, entrypoint: str) -> tuple[str, str]:
     test_name = f"test_{entrypoint}"
-    if test_name not in code:
+    pattern = f"def {test_name}"
+    match_index = code.find(pattern)
+    if match_index == -1:
         return code, ""
-    import re
-    code_without_tests = re.split(f"def {test_name}", code)[0]
-    tests = f"def {test_name}" + re.split(f"def {test_name}", code)[1] 
+    code_without_tests = code[:match_index]
+    tests = code[match_index:]
     return code_without_tests, tests
 
 def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
@@ -50,6 +51,8 @@ def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
     print(f"Loaded {len(data)} examples from {dataset_name} split {split}")
     data = data.filter(lambda x: x["pytorch_code_fixed"] is not None)
     print(f"Filtered to {len(data)} examples with non-None pytorch_code_fixed")
+    data = data.filter(lambda x: x["entrypoint"] is not None)
+    print(f"Filtered to {len(data)} examples with non-None entrypoint")
 
     def format_example(example):
         # Format the prompt with the preprocessed code
@@ -59,7 +62,8 @@ def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
         return {
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT.format(pytorch_code=code_without_tests)}
+                {"role": "user", "content": USER_PROMPT.format(pytorch_code=code_without_tests)},
+                {"role": "assistant", "content": "<think>"},
             ],
             "pt_code_without_tests": code_without_tests,
             "tests": tests
@@ -81,4 +85,4 @@ if __name__ == "__main__":
     pprint(dataset[0]["tests"])
     print("-"*100)
     pprint(dataset[0]["pt_code_without_tests"])
-    print(len(dataset))
+    print(len(dataset)) 
