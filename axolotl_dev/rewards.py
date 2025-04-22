@@ -1,4 +1,6 @@
-import random  
+import random
+import subprocess
+
 import weave
 import math
 import re
@@ -68,7 +70,9 @@ def think_reward(completions, **kwargs):
     for response in responses:
         think_score = think_scorer(response)
         ok = think_score["thinking_ok"]
-        reward = 0.2 * math.exp(-think_score["thinking_length"]/1000) if ok else -0.1
+        thinking_length = think_score["thinking_length"]
+        thinking_length = max(thinking_length - 5000, 0)
+        reward = 0.2 * math.exp(-thinking_length/1000) if ok else -0.1
         rewards.append(reward)
     return rewards
 
@@ -76,7 +80,7 @@ def think_reward(completions, **kwargs):
 def one_code_blob(output):
     "Check if the output has exactly one Python code blob after removing the think block"
     # Remove the think block first
-    output_without_think = re.sub(r"<think>.*?</think>", "", output, flags=re.DOTALL).strip()
+    output_without_think = output.split("</think>")[-1].strip()
 
     code_blobs = re.findall(r"```python(.*?)```", output_without_think, re.DOTALL)
 
@@ -119,11 +123,15 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
 
     # Run the triton code
     if RUN_SAFE:
-        triton_output = run_python_code(triton_and_test)
+        try:
+            triton_output = run_python_code(triton_and_test)
+        except subprocess.TimeoutExpired:
+            return {"triton_runs": False, "pt_runs": True, "match": False}
+
     else:
         triton_output = run_python_in_process(triton_and_test)
 
-    match = (pytorch_code_output == triton_output["stdout"] 
+    match = (pytorch_code_output == triton_output["stdout"]
              and triton_output["status_code"] == 0)
 
     return {"triton_runs": triton_output["status_code"] == 0,
@@ -187,7 +195,7 @@ def imports_decorator_reward(completions, **kwargs):
 @weave.op
 def constexpr_scorer(code: str) -> dict:
     """Checks if tl.constexpr is used."""
-    uses_constexpr = re.search(r"tl\.constexpr\s*\(", code) is not None
+    uses_constexpr = re.search(r"tl\.constexpr[,\s]+", code) is not None
     return {"uses_constexpr": uses_constexpr}
 
 def constexpr_reward(completions, **kwargs):
