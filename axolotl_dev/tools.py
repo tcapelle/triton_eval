@@ -20,9 +20,9 @@ TEMP_FILES_DIR.mkdir(exist_ok=True)
 def extract_code(code: str) -> str:
     "Extract the last code block surrounded by ```python, use re"
     pattern = r"```python(.*?)```"
-    match = re.search(pattern, code, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    matches = re.findall(pattern, code, re.DOTALL)
+    if matches:
+        return matches[-1].strip()
     else:
         return ""
 
