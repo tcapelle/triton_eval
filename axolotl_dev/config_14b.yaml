@@ -58,8 +58,8 @@ wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
 wandb_name: grpo-beta-zero
 
-gradient_accumulation_steps: 1
-micro_batch_size: 16  # should match num_generations / num_gpus
+gradient_accumulation_steps: 2
+micro_batch_size: 8  # should match num_generations / num_gpus
 num_epochs: 5
 
 optimizer: adamw_torch_fused

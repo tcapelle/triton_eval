@@ -7,9 +7,19 @@ import torch
 import os
 import httpx
 import asyncio
+import torch.distributed as dist
+import requests
+import logging
 
-# if torch.distributed.get_rank() == 0:
-#     weave.init("grpo-cuda/axolotl-grpo")
+# Configure httpx logger to only show WARNING or higher levels
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+try:
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+        weave.init("grpo-cuda/axolotl-grpo")
+except:
+    # If not in distributed mode or any other error, initialize weave anyway
+    weave.init("grpo-cuda/axolotl-grpo")
 
 RUN_ON_SERVER = True  # When True, execute Triton code via the /run_code API instead of locally
 
@@ -30,14 +40,21 @@ async def _run_code_on_server(code: str, tests: str) -> dict:
     `{"stdout": str, "stderr": str, "status_code": int}`
     """
     async with httpx.AsyncClient() as client:
-        response = await client.post(RUN_CODE_ENDPOINT, json={ "code": code, "tests": tests }, timeout=180.0)
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "stdout": data.get("stdout", ""),
-            "stderr": data.get("stderr", ""),
-            "status_code": data.get("status_code", -1),
-        }
+        try:
+            resp = await client.post(RUN_CODE_ENDPOINT,
+                                     json={"code": code, "tests": tests},
+                                     timeout=180.0)
+            resp.raise_for_status()
+            data = resp.json()
+            return {"stdout": data.get("stdout", ""),
+                    "stderr": data.get("stderr", ""),
+                    "status_code": data.get("status_code", -1)}
+        except httpx.HTTPStatusError as e:
+            # 503, 504, 500… – treat as execution failure
+            return {"stdout": "", "stderr": str(e), "status_code": -1}
+        except Exception as e:
+            # Network or other unexpected error
+            return {"stdout": "", "stderr": str(e), "status_code": -1}
 
 # generated deadlocks with tokenizers
 # weave.init("grpo-cuda/axolotl-grpo")
@@ -376,3 +393,7 @@ def torch_zeros_reward(completions, **kwargs):
         score = torch_zeros_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["torch_zeros_ok"] if score["uses_torch_zeros"] else 0)
     return rewards
+
+if dist.get_rank() == 0:
+    requests.post(f"{SERVER_URL}/start_workers", timeout=30)
+dist.barrier()

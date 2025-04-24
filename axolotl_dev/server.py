@@ -29,7 +29,7 @@ except ImportError:
 
 CONCURRENCY_PER_GPU = 1
 WORKER_COUNT = NUM_GPUS * CONCURRENCY_PER_GPU
-TASK_TIMEOUT_SECONDS = 120 # Timeout for each task execution in seconds (e.g., 2 minutes)
+TASK_TIMEOUT_SECONDS = 60 # Timeout for each task execution in seconds (e.g., 2 minutes)
 WORKER_JOIN_TIMEOUT = 10 # Seconds to wait for worker processes to join gracefully
 
 # Queues and shared state
@@ -364,6 +364,7 @@ async def run_code_endpoint(request: CodeExecutionRequest):
         "import triton.language as tl\n\n"
         f"{request.code}\n\n"
         "# ---- Tests Below ----\n"
+        "DEVICE = torch.device('cuda')\n"
         f"{request.tests}\n"
     )
 
