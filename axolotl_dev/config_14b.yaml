@@ -15,11 +15,6 @@ trl:
   max_completion_length: 4096
   use_vllm: true
   reward_funcs:
-    # - gsm8k_grpo.correctness_reward_func
-    # - gsm8k_grpo.int_reward_func
-    # - gsm8k_grpo.strict_format_reward_func
-    # - gsm8k_grpo.soft_format_reward_func
-    # - gsm8k_grpo.xmlcount_reward_func
     - rewards.think_reward
     - rewards.one_code_blob_reward
     - rewards.reward_code_runs
@@ -58,7 +53,7 @@ wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
 wandb_name: grpo-beta-zero
 
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 3
 micro_batch_size: 8  # should match num_generations / num_gpus
 num_epochs: 5
 
