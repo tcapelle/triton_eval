@@ -18,7 +18,7 @@ from datasets import load_dataset
 from rich import print
 import simple_parsing as sp
 
-from rewards import reward_code_runs  # Local package already on PYTHONPATH
+from rewards import reward_code_runs
 
 # ---------------------------------------------------------------------------
 # CLI args
@@ -82,12 +82,15 @@ async def main(args: Args) -> None:
             tests_list.append(tests)
             pt_outputs.append(pt_out)
 
-        # Compute rewards concurrently
+        # Compute rewards concurrently using thread pool since reward_code_runs is synchronous
+        loop = asyncio.get_running_loop()
         tasks = [
-            reward_code_runs(
-                completions=[comp],
-                tests=[tests_list[i]],
-                pytorch_code_output=[pt_outputs[i] if pt_outputs[i] else ""],
+            loop.run_in_executor(
+                None,
+                reward_code_runs,
+                [comp],
+                [tests_list[i]],
+                [pt_outputs[i] if pt_outputs[i] else ""],
             )
             for i, comp in enumerate(completions)
         ]

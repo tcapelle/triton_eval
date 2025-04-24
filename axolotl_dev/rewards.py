@@ -199,12 +199,29 @@ def _compute_code_runs_reward(run_output):
         return REWARD_MAGNITUDES["code_runs_match"]
 
 @weave.op
-async def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
-    responses = [completion[0]['content'] for completion in completions]
-    tasks = [run_scorer_async(resp, tests[0], pytorch_code_output[0]) for resp in responses]
-    run_scores = await asyncio.gather(*tasks)
-    rewards = [_compute_code_runs_reward(score) for score in run_scores]
-    return rewards
+def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
+    """Synchronous wrapper around the async implementation.
+
+    We build coroutines for all completions, execute them concurrently with
+    `asyncio.gather`, and then return the computed rewards.
+    """
+
+    async def _compute_async():
+        responses = [completion[0]['content'] for completion in completions]
+        tasks = [run_scorer_async(resp, tests[0], pytorch_code_output[0]) for resp in responses]
+        run_scores = await asyncio.gather(*tasks)
+        return [_compute_code_runs_reward(score) for score in run_scores]
+
+    try:
+        # If there's already a running loop (unlikely in most sync contexts),
+        # we schedule the coroutine in that loop and block until done.
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop – safe to create one.
+        return asyncio.run(_compute_async())
+    else:
+        # Running loop exists; run the coroutine and wait.
+        return loop.run_until_complete(_compute_async())
 
 # ===== Static Code Analysis Rewards =====
 
