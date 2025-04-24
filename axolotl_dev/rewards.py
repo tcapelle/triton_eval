@@ -4,13 +4,40 @@ import math
 import subprocess
 import re
 import torch
+import os
+import httpx
+import asyncio
 
-if torch.distributed.get_rank() == 0:
-    weave.init("grpo-cuda/axolotl-grpo")
+# if torch.distributed.get_rank() == 0:
+#     weave.init("grpo-cuda/axolotl-grpo")
 
-RUN_SAFE = True
+RUN_ON_SERVER = True  # When True, execute Triton code via the /run_code API instead of locally
 
-from tools import extract_code, run_python_in_process, run_python_code
+from tools import extract_code, run_python_code  # run_python_in_process no longer used
+
+# ---------------------------------------------------------------------------
+# Remote execution helper
+# ---------------------------------------------------------------------------
+
+SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
+RUN_CODE_ENDPOINT = f"{SERVER_URL}/run_code"
+
+
+async def _run_code_on_server(code: str, tests: str) -> dict:
+    """Synchronously execute Triton `code` + `tests` on the remote worker pool.
+
+    Returns a dict compatible with the structure produced by `run_python_code`:
+    `{"stdout": str, "stderr": str, "status_code": int}`
+    """
+    async with httpx.AsyncClient() as client:
+        response = await client.post(RUN_CODE_ENDPOINT, json={ "code": code, "tests": tests }, timeout=180.0)
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "stdout": data.get("stdout", ""),
+            "stderr": data.get("stderr", ""),
+            "status_code": data.get("status_code", -1),
+        }
 
 # generated deadlocks with tokenizers
 # weave.init("grpo-cuda/axolotl-grpo")
@@ -127,7 +154,7 @@ def one_code_blob_reward(completions, **kwargs):
     return rewards
 
 @weave.op
-def run_scorer(output: str, tests: str, pytorch_code_output: str):
+async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
     "Runs the code and returns the output"
     assert isinstance(tests, str), f"tests is not a string: {tests}"
     # run pt code
@@ -141,13 +168,16 @@ def run_scorer(output: str, tests: str, pytorch_code_output: str):
         return {"triton_runs": False, "pt_runs": True, "match": False}
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
-    if RUN_SAFE:
+    if RUN_ON_SERVER:
+        triton_output = await _run_code_on_server(triton_code, tests)
+        if triton_output["status_code"] != 0:
+            return {"triton_runs": False, "pt_runs": True, "match": False}
+    else:
+        # Fallback to local execution (kept for completeness)
         try:
             triton_output = run_python_code(triton_and_test, env)
         except subprocess.TimeoutExpired:
             return {"triton_runs": False, "pt_runs": True, "match": False}
-    else:
-        triton_output = run_python_in_process(triton_and_test, env)
 
     match = (
         pytorch_code_output == triton_output["stdout"] 
@@ -169,16 +199,10 @@ def _compute_code_runs_reward(run_output):
         return REWARD_MAGNITUDES["code_runs_match"]
 
 @weave.op
-def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
-    "Reward the model for the code running - runs checks in parallel"
+async def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
     responses = [completion[0]['content'] for completion in completions]
-    rewards = []
-
-    # dummy seq run
-    run_scores = [run_scorer(response, tests[0], pytorch_code_output[0]) for response in responses]
-
-
-    # Extract the 'match' status from each result
+    tasks = [run_scorer_async(resp, tests[0], pytorch_code_output[0]) for resp in responses]
+    run_scores = await asyncio.gather(*tasks)
     rewards = [_compute_code_runs_reward(score) for score in run_scores]
     return rewards
 
