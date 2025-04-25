@@ -6,8 +6,8 @@ from rich.pretty import pprint
 
 @dataclass
 class Args:
-    dataset_name: str = "tcapelle/dataset_wiht_pt_errors"#"GPUMODE/Inductor_Created_Data_Permissive"
-    code_column: str = "pytorch_code_fixed"
+    dataset_name: str = "tcapelle/train_ds_triton"#"GPUMODE/Inductor_Created_Data_Permissive"
+    code_column: str = "pt_code"
 
 
 SYSTEM_PROMPT = """
@@ -25,7 +25,7 @@ Pytorch code:
 ```python
 {pytorch_code}```
 
-The function should have the same name as the PyTorch function. 
+The function should have the same name as the PyTorch function: {entrypoint}
 
 Don't forget to format your answer as:
 <think>
@@ -35,54 +35,37 @@ thinking process
 code
 ```"""
 
-def split_at_tests(code: str, entrypoint: str) -> tuple[str, str]:
-    test_name = f"test_{entrypoint}"
-    pattern = f"def {test_name}"
-    match_index = code.find(pattern)
-    if match_index == -1:
-        return code, ""
-    code_without_tests = code[:match_index]
-    tests = code[match_index:]
-    return code_without_tests, tests
 
-def get_dataset(dataset_name, split="train", code_column="pytorch_code"):
+def get_dataset(dataset_name, code_column, split="train", ):
     # Load the dataset - this is expected to be preprocessed by prepare_dataset.py
     data = load_dataset(dataset_name)[split]
     print(f"Loaded {len(data)} examples from {dataset_name} split {split}")
-    data = data.filter(lambda x: x["pytorch_code_fixed"] is not None)
-    print(f"Filtered to {len(data)} examples with non-None pytorch_code_fixed")
+    data = data.filter(lambda x: x[code_column] is not None)
+    print(f"Filtered to {len(data)} examples with non-None {code_column}")
     data = data.filter(lambda x: x["entrypoint"] is not None)
     print(f"Filtered to {len(data)} examples with non-None entrypoint")
+    data = data.filter(lambda x: x["tests"] is not None)
+    print(f"Filtered to {len(data)} examples with non-None tests")
 
     def format_example(example):
         # Format the prompt with the preprocessed code
         pytorch_code = example[code_column]
         entrypoint = example["entrypoint"]
-        code_without_tests, tests = split_at_tests(pytorch_code, entrypoint)
         return {
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT.format(pytorch_code=code_without_tests)},
+                {"role": "user", "content": USER_PROMPT.format(pytorch_code=pytorch_code, entrypoint=entrypoint)},
                 {"role": "assistant", "content": "<think>"},
             ],
-            "pt_code_without_tests": code_without_tests,
-            "tests": tests
         }
     
     # Format each example in the dataset
     formatted_data = data.map(format_example)
 
-    formatted_data = formatted_data.filter(lambda x: x["tests"] is not None)
-    print(f"Filtered to {len(formatted_data)} examples with non-None tests")
-    
     return formatted_data
 
 if __name__ == "__main__":
     args = sp.parse(Args)
-    dataset = get_dataset(args.dataset_name, "train", args.code_column)
+    dataset = get_dataset(args.dataset_name, args.code_column, split="train")
     # dataset.save_to_disk("train_dataset")
     dataset.push_to_hub("tcapelle/train_ds_triton", commit_message="push prepared")
-    pprint(dataset[0]["tests"])
-    print("-"*100)
-    pprint(dataset[0]["pt_code_without_tests"])
-    print(len(dataset)) 
