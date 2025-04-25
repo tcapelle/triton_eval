@@ -202,9 +202,21 @@ class WorkerPool:
                 console.print("[pool] [yellow]No workers currently running.[/yellow]")
                 return False
 
-            console.print(f"[pool] Sending shutdown signal to [cyan]{len(self._workers)}[/cyan] worker(s)...")
+            console.print(f"[pool] Stopping [cyan]{len(self._workers)}[/cyan] worker(s)...")
 
-            # Send poison pills
+            # 1. Cancel monitor loop *first* to prevent interference
+            if self._monitor_task and not self._monitor_task.done():
+                self._monitor_task.cancel()
+                try:
+                    await self._monitor_task # Wait for cancellation
+                except asyncio.CancelledError:
+                    console.print("[pool] Monitor task cancelled successfully.")
+                except Exception as e:
+                    console.print(f"[pool] [red]Error awaiting cancelled monitor task:[/red] {e}")
+            self._monitor_task = None
+
+            # 2. Send poison pills
+            console.print(f"[pool] Sending poison pills...")
             for _ in self._workers:
                 try:
                     self.task_queue.put_nowait((None, None))
@@ -213,32 +225,39 @@ class WorkerPool:
                 except Exception as exc:
                     console.print(f"[pool] [red]Error sending poison pill:[/red] {exc}")
 
-            # Wait for workers to exit (best-effort)
+            # 3. Wait for workers to exit (best-effort)
+            console.print(f"[pool] Waiting for workers to join (timeout: {WORKER_JOIN_TIMEOUT}s)...")
             join_tasks = [
                 asyncio.to_thread(wp.process.join, timeout=WORKER_JOIN_TIMEOUT) for wp in self._workers
             ]
             results = await asyncio.gather(*join_tasks, return_exceptions=True)
 
             terminated = 0
+            alive_after_join = []
             for idx, res in enumerate(results):
                 proc = self._workers[idx].process
-                if isinstance(res, Exception) or proc.is_alive():
+                if proc.is_alive(): # Check if still alive after join attempt
+                    alive_after_join.append(proc.pid)
                     proc.terminate()
                     terminated += 1
+                elif isinstance(res, Exception):
+                     # Log exceptions during join, but process might have exited cleanly anyway
+                     console.print(f"[pool] [yellow]Error joining worker PID {proc.pid}: {res}[/yellow]")
 
-            if terminated:
-                console.print(f"[pool] Force terminated {terminated} unresponsive worker(s).")
+            if terminated > 0:
+                console.print(f"[pool] Force terminated {terminated} unresponsive worker(s): PIDs {alive_after_join}")
+            else:
+                console.print(f"[pool] All workers joined gracefully.")
 
-            # Clear state and cancel monitor
+            # 4. Clear internal state
             self._workers.clear()
-            if self._monitor_task:
-                self._monitor_task.cancel()
-                self._monitor_task = None
+            console.print("[pool] Worker list cleared.")
 
             # Sync global alias for backward compatibility
             global workers  # noqa: WPS420
             workers = []
 
+            console.print("[pool] [green]Stop sequence complete.[/green]")
             return True
 
     # ------------------------------------------------------------------
