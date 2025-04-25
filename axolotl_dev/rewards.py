@@ -200,9 +200,15 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
         pytorch_code_output == triton_output["stdout"] 
         and triton_output["status_code"] == 0)
 
-    return {"triton_runs": triton_output["status_code"] == 0,
-            "pt_runs": True,
-            "match": match}
+    result = {
+        "triton_runs": triton_output["status_code"] == 0,
+        "pt_runs": True,
+        "match": match}
+    # the full payload for debugging and weave capture
+    if RUN_ON_SERVER:
+        result["stdout"] = triton_output["stdout"]
+        result["stderr"] = triton_output["stderr"]
+    return result
 
 def _compute_code_runs_reward(run_output):
     "If the code doesn't run, renturn -1, it if runs but doesn't match, return 0, otherwise return 1"
