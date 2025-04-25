@@ -182,28 +182,26 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
 
     triton_code = extract_code(output)
     if len(triton_code) < 10:
-        return {"triton_runs": False, "pt_runs": True, "match": False}
+        return {"triton_runs": False, "match": False}
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     if RUN_ON_SERVER:
         triton_output = await _run_code_on_server(triton_code, tests)
-        if triton_output["status_code"] != 0:
-            return {"triton_runs": False, "pt_runs": True, "match": False}
     else:
         # Fallback to local execution (kept for completeness)
         try:
             triton_output = run_python_code(triton_and_test, env)
         except subprocess.TimeoutExpired:
-            return {"triton_runs": False, "pt_runs": True, "match": False}
+            return {"triton_runs": False, "match": False}
 
-    match = (
-        pytorch_code_output == triton_output["stdout"] 
-        and triton_output["status_code"] == 0)
+    runs = triton_output["status_code"] == 0
+    match = pytorch_code_output == triton_output["stdout"] and runs
 
     result = {
-        "triton_runs": triton_output["status_code"] == 0,
-        "pt_runs": True,
-        "match": match}
+        "triton_runs": runs,
+        "match": match
+        }
+    
     # the full payload for debugging and weave capture
     if RUN_ON_SERVER:
         result["stdout"] = triton_output["stdout"]
