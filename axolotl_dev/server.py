@@ -28,7 +28,7 @@ except ImportError:
     console.print("[server] [yellow]Warning:[/yellow] torch not installed, defaulting to 1 GPU.")
     NUM_GPUS = 1
 
-CONCURRENCY_PER_GPU = 1
+CONCURRENCY_PER_GPU = 2
 WORKER_COUNT = NUM_GPUS * CONCURRENCY_PER_GPU
 TASK_TIMEOUT_SECONDS = 60 # Timeout for each task execution in seconds (e.g., 2 minutes)
 WORKER_JOIN_TIMEOUT = 10 # Seconds to wait for worker processes to join gracefully
@@ -104,7 +104,7 @@ class WorkerPool:
     the pool will transparently spawn a replacement so the overall capacity remains unchanged.
     """
 
-    MONITOR_INTERVAL = 3  # Seconds between liveness checks
+    MONITOR_INTERVAL = 1  # Seconds between liveness checks (Reduced from 3)
 
     def __init__(self, num_gpus: int, concurrency_per_gpu: int):
         self.num_gpus = num_gpus
