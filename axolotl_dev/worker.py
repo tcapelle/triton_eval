@@ -1,4 +1,4 @@
-# worker.py
+# axolotl_dev/worker.py
 
 import os
 import sys
@@ -7,133 +7,130 @@ import traceback
 import torch
 import triton
 import triton.language as tl
-import triton.compiler.errors # Import Triton compiler errors
+import triton.compiler.errors
 import math
+import tempfile
+import importlib.util
+import uuid
+import logging
 
-import tempfile # Add tempfile
-import importlib.util # Add importlib.util
-import uuid # Add uuid for unique module names
+from axolotl_dev.celery_config import celery_app
 
-def is_fatal_error(exception) -> bool:
-    """Checks if an exception should cause the worker to terminate."""
-    # Triton compilation errors are considered fatal
+# Configure logging for the worker
+# Note: Celery workers have their own logging setup, this might be supplemental
+log = logging.getLogger(__name__)
+handler = logging.StreamHandler(sys.__stderr__) # Log to original stderr
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+log.addHandler(handler)
+log.setLevel(logging.INFO)
+
+def _is_fatal_error(exception) -> bool:
+    """Checks if an exception should be considered fatal for the worker environment."""
     if isinstance(exception, triton.compiler.errors.CompilationError):
+        log.warning("Fatal error type: Triton CompilationError")
         return True
-
-    # Check if the traceback contains uppercase "CUDA" (e.g., CUDA OOM)
-    tb_str = traceback.format_exc() # Get the full traceback string
+    tb_str = traceback.format_exc()
     if "CUDA" in tb_str:
+        log.warning("Fatal error type: CUDA error detected in traceback")
         return True
-
+    # Add any other specific error types that indicate a poisoned worker environment
     return False
 
-def worker_main(task_queue, result_queue, gpu_id):
-    """
-    Each worker process runs this function:
-      - Pins itself to a specific GPU
-      - Waits for code from the master process (server)
-      - Executes the code via exec()
-      - Returns stdout/stderr and status_code
-      - Exits only if a CUDA/Triton compilation error occurs, otherwise reports errors and continues.
-    """
-    # Pin GPU via environment (so torch sees only 1 device)
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+@celery_app.task(bind=True, throws=(
+    # List exceptions here that should NOT trigger a retry and are handled
+    # Note: If _is_fatal_error is True, Celery won't retry anyway by default if task_acks_late=True
+    Exception,
+))
+def execute_triton_code(self, code: str, tests: str):
+    """Celery task to execute Triton code with tests."""
+    task_id = self.request.id
+    log.info(f"Task {task_id}: Received execution request.")
 
-    original_stderr_for_logging = sys.__stderr__ # Capture original stderr early
+    # Check which GPU this worker is assigned to (set during worker launch)
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    log.info(f"Task {task_id}: Worker assigned to GPU(s): {cuda_visible_devices if cuda_visible_devices else 'Not Set (Default)'}")
 
-    print(f"[Worker PID {os.getpid()}] Bound to GPU {gpu_id}. Importing libraries...", file=original_stderr_for_logging, flush=True)
+    # Combine code and tests
+    code_string = (
+        "import torch\n"
+        "import triton\n"
+        "import triton.language as tl\n"
+        "import math\n\n" # Added math
+        f"{code}\n\n"
+        "# ---- Tests Below ----\n"
+        "DEVICE = torch.device('cuda')\n" # Assumes code needs 'cuda' device
+        f"{tests}\n"
+    )
 
-    while True:
-        task_id, code_string = task_queue.get()
-        if code_string is None:
-            print(f"[Worker PID {os.getpid()}] Received poison pill. Exiting.", file=original_stderr_for_logging, flush=True)
-            break # Exit loop cleanly
+    # Prepare to capture stdout/stderr
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    mystdout, mystderr = io.StringIO(), io.StringIO()
+    sys.stdout, sys.stderr = mystdout, mystderr
 
-        # Prepare to capture stdout/stderr
-        old_stdout, old_stderr = sys.stdout, sys.stderr
-        mystdout, mystderr = io.StringIO(), io.StringIO()
-        sys.stdout, sys.stderr = mystdout, mystderr
+    status_code = 0
+    temp_file_path = None
+    result = {}
 
-        status_code = 0
-        temp_file_path = None
-        result_stdout = ""
-        result_stderr = ""
-        should_exit = False # Flag to control worker exit
+    try:
+        log.debug(f"Task {task_id}: Creating temporary file.")
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', dir='/tmp') as tmp:
+             temp_file_path = tmp.name
+             tmp.write(code_string)
+        log.debug(f"Task {task_id}: Wrote code to {temp_file_path}")
 
-        try:
-            # Create and write to temporary file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', dir='/tmp') as tmp:
-                 temp_file_path = tmp.name
-                 tmp.write(code_string)
+        module_name = f"triton_kernel_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not create module spec for {temp_file_path}")
 
-            # Setup module loading
-            module_name = f"triton_kernel_{uuid.uuid4().hex}"
-            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Could not create module spec for {temp_file_path}")
-            kernel_module = importlib.util.module_from_spec(spec)
-            kernel_module.__dict__.update({
-                'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
-            })
+        kernel_module = importlib.util.module_from_spec(spec)
+        kernel_module.__dict__.update({
+            'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
+        })
 
-            # Execute the code
-            spec.loader.exec_module(kernel_module)
-            # If execution succeeds, status_code remains 0
+        log.info(f"Task {task_id}: Executing code...")
+        spec.loader.exec_module(kernel_module)
+        log.info(f"Task {task_id}: Execution successful.")
+        status_code = 0 # Explicitly set success
 
-        except Exception as e:
-            status_code = -1
-            tb = traceback.format_exc()
-            mystderr.write(tb) # Write traceback to captured stderr first
+    except Exception as e:
+        status_code = -1
+        tb = traceback.format_exc()
+        mystderr.write(tb) # Capture traceback
 
-            if is_fatal_error(e):
-                # Log as fatal error leading to exit
-                print(f"[Worker PID {os.getpid()}] Task {task_id} FATAL error detected:\\n{tb}", file=original_stderr_for_logging, flush=True)
-                print(f"[Worker PID {os.getpid()}] Exiting due to fatal error in task {task_id}.", file=original_stderr_for_logging, flush=True)
-                should_exit = True # Mark worker for exit
-            else:
-                # Log as non-fatal error, worker will continue
-                print(f"[Worker PID {os.getpid()}] Task {task_id} non-fatal execution error:\\n{tb}", file=original_stderr_for_logging, flush=True)
-                print(f"[Worker PID {os.getpid()}] Continuing after non-fatal error in task {task_id}.", file=original_stderr_for_logging, flush=True)
-                # should_exit remains False
+        if _is_fatal_error(e):
+            log.error(f"Task {task_id}: FATAL error during execution. Worker may need restart.\n{tb}")
+            # Potentially raise a specific exception or let Celery handle based on acks_late
+            # For now, just log and return the error result.
+            # If using acks_late, the worker might not acknowledge and Celery might retry
+            # depending on configuration. If the error persists, the task will eventually fail.
+        else:
+            log.warning(f"Task {task_id}: Non-fatal error during execution.\n{tb}")
+        # We always return a result, even on error
 
-        finally:
-            # --- This block runs ALWAYS after try/except ---
+    finally:
+        # Restore stdout/stderr
+        sys.stdout, sys.stderr = old_stdout, old_stderr
 
-            # 1. Restore stdout/stderr to capture results and prevent pollution
-            sys.stdout, sys.stderr = old_stdout, old_stderr
-            result_stdout = mystdout.getvalue()
-            result_stderr = mystderr.getvalue() # Contains potential traceback from except blocks
+        # Get captured output
+        out_str = mystdout.getvalue()
+        err_str = mystderr.getvalue()
 
-            # 2. Send result back to the server
-            result = {
-                "task_id": task_id,
-                "status_code": status_code,
-                "stdout": result_stdout,
-                "stderr": result_stderr
-            }
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
             try:
-                 result_queue.put(result, timeout=5)
-                 # Log success only if no error occurred before finally
-                 if status_code == 0:
-                      print(f"[Worker PID {os.getpid()}] Successfully executed and sent result for task {task_id}.", file=original_stderr_for_logging, flush=True)
-                 else:
-                      print(f"[Worker PID {os.getpid()}] Successfully sent error result for task {task_id}.", file=original_stderr_for_logging, flush=True)
-            except Exception as put_e:
-                 # Log failure to send result, regardless of task success/failure
-                 print(f"[Worker PID {os.getpid()}] Failed to put result to queue for task {task_id}: {put_e}", file=original_stderr_for_logging, flush=True)
+                os.remove(temp_file_path)
+                log.debug(f"Task {task_id}: Removed temp file {temp_file_path}")
+            except OSError as rm_e:
+                log.error(f"Task {task_id}: Error removing temp file {temp_file_path}: {rm_e}")
 
-            # 3. Clean up the temporary file
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except OSError as rm_e:
-                    print(f"[Worker PID {os.getpid()}] Error removing temp file {temp_file_path}: {rm_e}", file=original_stderr_for_logging, flush=True)
+        # Prepare result dictionary
+        result = {
+            "status_code": status_code,
+            "stdout": out_str,
+            "stderr": err_str,
+        }
+        log.info(f"Task {task_id}: Sending result: status_code={status_code}")
 
-            # 4. Exit worker ONLY if a fatal error occurred (should_exit == True)
-            if should_exit:
-                break # Exit the while loop
-
-        # If no fatal error occurred (should_exit is False), the loop continues to the next task implicitly
-
-    # End of worker_main function (reached only on poison pill or fatal error)
-    print(f"[Worker PID {os.getpid()}] Worker main loop finished. Process exiting.", file=original_stderr_for_logging, flush=True)
+    return result # Return value is stored in the Celery backend
