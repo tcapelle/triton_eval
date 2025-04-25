@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.rule import Rule
 from dataclasses import dataclass
 from typing import List, Optional
+from contextlib import asynccontextmanager
 
 # --- Rich Console Initialization ---
 console = Console()
@@ -51,7 +52,37 @@ class CodeExecutionResponse(BaseModel):
     stdout: str = ""
     stderr: str = ""
 
-app = FastAPI()
+# --- Lifespan Context Manager ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    console.print(Rule("[bold blue]Server Startup (lifespan)[/bold blue]"))
+    # Start workers automatically
+    success = await worker_pool.start()
+    if not success:
+        console.print("[server] [bold red]CRITICAL: Failed to start initial worker pool on startup![/bold red]")
+        # Consider exiting or handling this failure scenario appropriately
+    else:
+        console.print(f"[server] [green]Initial worker pool started with {worker_pool.active_count} worker(s).[/green]")
+
+    collector_task = asyncio.create_task(result_collector())
+    console.print("[server] [bold green]Startup complete. Ready for requests.[/bold green]")
+
+    yield # Server runs here
+
+    # Shutdown logic
+    console.print(Rule("[bold blue]Server Shutdown (lifespan)[/bold blue]"))
+    await kill_workers_internal()
+    # Optionally cancel the collector task if it hasn't finished
+    if collector_task and not collector_task.done():
+        collector_task.cancel()
+        try:
+            await collector_task # Wait for cancellation to complete
+        except asyncio.CancelledError:
+            console.print("[server] Result collector task cancelled successfully.")
+    console.print("[server] [bold green]Shutdown complete.[/bold green]")
+
+app = FastAPI(lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Worker pool management
@@ -298,50 +329,6 @@ async def result_collector():
             console.print(f"[server] [bold red]Error in result collector:[/bold red] {e}")
             await asyncio.sleep(1)
 
-
-@app.on_event("startup")
-async def on_startup():
-    """Start background tasks, but not workers."""
-    console.print(Rule("[bold blue]Server Startup[/bold blue]"))
-    # Don't spawn workers here
-    asyncio.create_task(result_collector())
-    console.print("[server] [bold green]Startup complete. Ready for requests.[/bold green]")
-    console.print("[server] [bold yellow]Workers are NOT started automatically. Use POST /start_workers.[/bold yellow]")
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    """Ensure workers are stopped on shutdown."""
-    console.print(Rule("[bold blue]Server Shutdown[/bold blue]"))
-    await kill_workers_internal()
-    console.print("[server] [bold green]Shutdown complete.[/bold green]")
-
-# --- New Endpoints ---
-@app.post("/start_workers")
-async def start_workers_endpoint():
-    """Endpoint to start the worker processes."""
-    success = await spawn_workers_internal()
-    if success:
-        return {"message": f"{worker_pool.active_count} workers started successfully."}
-    else:
-        # Use status code to indicate failure if workers were already running or failed to start
-        # Check global 'workers' list state *after* attempting spawn
-        status = 409 if worker_pool.is_running else 500
-        detail = "Workers already running." if status == 409 else "Failed to start workers."
-        raise HTTPException(status_code=status, detail=detail)
-
-
-@app.post("/stop_workers")
-async def stop_workers_endpoint():
-    """Endpoint to stop the worker processes."""
-    success = await kill_workers_internal()
-    if success:
-        return {"message": "Workers stopped successfully."}
-    else:
-        # This case (returning False) only happens if kill_workers_internal finds no workers running
-        raise HTTPException(status_code=409, detail="No workers were running.")
-# --- End New Endpoints ---
-
 @app.get("/")
 def read_root():
     return {"message": "Triton Worker Pool Server is ready!"}
@@ -350,11 +337,13 @@ def read_root():
 @app.post("/run_code", response_model=CodeExecutionResponse)
 async def run_code_endpoint(request: CodeExecutionRequest):
     """API endpoint to execute code."""
-    # Add check to ensure workers are running (read access, no lock needed here)
+    # Workers should now always be running unless startup failed or they crashed.
+    # Keep the check to handle edge cases like crashes or failed resets.
     if not worker_pool.is_running:
+        console.print("[server] [bold red]Rejecting request:[/bold red] Worker pool is not operational.")
         raise HTTPException(
             status_code=503,
-            detail="Workers are not running. Please start workers via POST /start_workers.",
+            detail="Workers are not currently operational. The server might be initializing, resetting, or encountered an error.",
         )
 
     task_id = str(uuid.uuid4())
@@ -414,18 +403,39 @@ async def run_code_endpoint(request: CodeExecutionRequest):
         in_flight_requests.pop(task_id, None) # Clean up future for timed-out task
         raise HTTPException(status_code=504, detail=f"Task execution timed out after {TASK_TIMEOUT_SECONDS} seconds.")
     except asyncio.CancelledError:
-         console.print(f"[server] Task {task_id} [yellow]cancelled[/yellow], likely due to worker shutdown.")
          # Future is already removed/cancelled by kill_workers_internal
-         raise HTTPException(status_code=503, detail="Task cancelled, workers may have been stopped.")
+         # Log cancellation without raising HTTPException immediately, as it might be part of a controlled stop/reset
+         console.print(f"[server] Task {task_id} [yellow]cancelled[/yellow], likely due to worker shutdown or reset.")
+         # Ensure the future is removed from in_flight_requests
+         in_flight_requests.pop(task_id, None)
+         # Raise the HTTPException to inform the client
+         raise HTTPException(status_code=503, detail="Task cancelled, workers may have been stopped or reset.")
     except Exception as e:
          console.print(f"[server] [bold red]Error processing result[/bold red] for task {task_id}: {e}")
          in_flight_requests.pop(task_id, None)
          raise HTTPException(status_code=500, detail="Internal server error processing task result.")
+
+# Removed old on_event decorators as lifespan is used now.
+
+# --- API Endpoints ---
+
+@app.post("/reset_workers")
+async def reset_workers_endpoint():
+    """Stops all current workers and starts a fresh pool."""
+    console.print("[server] [bold yellow]Resetting workers...[/bold yellow]")
+    await kill_workers_internal()
+    success = await worker_pool.start()
+    if success:
+        console.print(f"[server] [green]Workers reset successfully. New worker pool started with {worker_pool.active_count} worker(s).[/green]")
+        return {"message": "Workers reset successfully."}
+    else:
+        console.print("[server] [bold red]Failed to reset workers.[/bold red]")
+        raise HTTPException(status_code=500, detail="Failed to reset workers.")
 
 # If you want to run with uvicorn directly from this file:
 if __name__ == "__main__":
     import uvicorn
     console.print(Rule("[bold blue]Starting Uvicorn[/bold blue]"))
     console.print(f"Host: 0.0.0.0, Port: 9347")
-    # Run uvicorn in the main process; worker spawning happens via endpoint
+    # Run uvicorn in the main process; worker spawning happens via lifespan
     uvicorn.run("server:app", host="0.0.0.0", port=9347, reload=False, log_config=None)

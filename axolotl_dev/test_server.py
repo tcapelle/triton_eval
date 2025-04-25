@@ -81,41 +81,14 @@ async def send_run_request(client: httpx.AsyncClient, code: str, tests: str):
         return None, None # Return None for duration on failure
 
 
-async def manage_workers(client: httpx.AsyncClient, action: str):
-    """Starts or stops the workers via API call."""
-    endpoint = START_WORKERS_ENDPOINT if action == "start" else STOP_WORKERS_ENDPOINT
-    console.print(f"Attempting to [cyan]{action}[/cyan] workers at {endpoint}...")
-    try:
-        response = await client.post(endpoint, timeout=30.0) # Timeout for worker management
-        response.raise_for_status()
-        console.print(f"[green]Successfully {action}ed workers:[/green] {response.json().get('message')}")
-        return True
-    except httpx.ConnectError:
-        console.print(f"[bold red]Connect Error:[/bold red] Failed to connect to server at {SERVER_URL} to {action} workers.")
-        return False
-    except httpx.HTTPStatusError as e:
-        # Handle conflicts gracefully (e.g., trying to start when already started)
-        if e.response.status_code == 409:
-             console.print(f"[yellow]Conflict:[/yellow] Could not {action} workers - {e.response.text}")
-             # If starting failed due to conflict, assume they are running for the test to proceed
-             return action == "start" # Return True if starting, False if stopping
-        else:
-             console.print(f"[bold red]HTTP Error:[/bold red] Failed to {action} workers ({e.response.status_code}): {e.response.text}")
-        return False
-    except Exception as e:
-        console.print(f"[bold red]An unexpected error occurred during worker management ({action}):[/bold red] {e} ({type(e).__name__})")
-        return False
-
-
 async def main(args: TestArgs): # Accept TestArgs instance
-    """Loads data for a specific range, starts workers, sends requests, stops workers."""
+    """Loads data for a specific range, sends requests to the server."""
     console.print(Rule("[bold blue]Starting Server Test[/bold blue]"))
     console.print(f"Targeting dataset range: index {args.start_index} to {args.start_index + args.num_examples - 1}")
 
     async with httpx.AsyncClient() as client:
-        if not await manage_workers(client, "start"):
-            console.print("[bold red]Failed to start workers. Aborting test.[/bold red]")
-            return
+        # Removed explicit worker start - server handles this via lifespan.
+        console.print("[info]Assuming workers are started automatically by the server.[/info]")
 
         try:
             console.print(f"Loading dataset: [cyan]{ds_name}[/cyan]")
@@ -225,8 +198,8 @@ async def main(args: TestArgs): # Accept TestArgs instance
                 console.print("No successful executions to calculate timing statistics.")
 
         finally:
-            console.print(Rule("[bold blue]Stopping Workers[/bold blue]"))
-            await manage_workers(client, "stop")
+            # Removed explicit worker stop - handled by server shutdown or reward reset logic.
+            console.print("[info]Skipping explicit worker stop in test client.[/info]")
 
     console.print(Rule("[bold blue]Test Finished[/bold blue]"))
 
