@@ -130,14 +130,14 @@ class WorkerPool:
 
     @property
     def is_running(self) -> bool:
-        """Whether the pool is considered operational.
+        """Whether the pool is considered operational and has active workers.
 
-        We report *running* as long as the pool has at least one worker process object.
-        A worker may have just crashed (active_count == 0) but the monitor will respawn
-        it within a couple of seconds; rejecting API requests outright would create
-        avoidable 503 spikes.
+        We consider the pool *running* only if there is at least one underlying
+        worker object **and** at least one of those processes is currently
+        alive.  This prevents the API from accepting requests when all workers
+        have died (which would otherwise lead to timeouts).
         """
-        return bool(self._workers)
+        return any(wp.process.is_alive() for wp in self._workers)
 
     # ---------------------------------------------------------------------
     # Lifecycle management
@@ -149,9 +149,15 @@ class WorkerPool:
         Returns `True` on fresh start, `False` if workers were already running or failed to start.
         """
         async with self.lock:
-            if self._workers:
+            # Fast path: If there are *alive* workers, consider the pool already running.
+            if any(wp.process.is_alive() for wp in self._workers):
                 console.print("[pool] [yellow]Workers already running. Cannot start again.[/yellow]")
                 return False
+
+            # If there are worker objects but none are alive (e.g. all crashed), clear them so we can respawn.
+            if self._workers and not any(wp.process.is_alive() for wp in self._workers):
+                console.print("[pool] [yellow]Found existing worker objects but none are alive. Cleaning up before restart...[/yellow]")
+                self._workers.clear()
 
             # Import locally to avoid fork issues on some platforms.
             from worker import worker_main  # noqa: WPS433 (allow inside function)
@@ -359,11 +365,15 @@ async def run_code_endpoint(request: CodeExecutionRequest):
     # Workers should now always be running unless startup failed or they crashed.
     # Keep the check to handle edge cases like crashes or failed resets.
     if not worker_pool.is_running:
-        console.print("[server] [bold red]Rejecting request:[/bold red] Worker pool is not operational.")
-        raise HTTPException(
-            status_code=503,
-            detail="Workers are not currently operational. The server might be initializing, resetting, or encountered an error.",
-        )
+        # Attempt to (re)start the worker pool automatically instead of immediately failing.
+        console.print("[server] [yellow]Worker pool not running. Attempting automatic restart...[/yellow]")
+        started = await worker_pool.start()
+        if not started:
+            console.print("[server] [bold red]Automatic worker pool restart failed.[/bold red]")
+            raise HTTPException(
+                status_code=503,
+                detail="Workers are not currently operational and automatic restart failed.",
+            )
 
     task_id = str(uuid.uuid4())
     code_string = (
@@ -391,12 +401,14 @@ async def run_code_endpoint(request: CodeExecutionRequest):
 
     console.print(f"[server] Received request, assigning Task ID: {task_id}")
     try:
-        task_queue.put_nowait((task_id, code_string)) # Use put_nowait, assuming queue isn't the bottleneck
-        console.print(f"[server] Task {task_id} added to queue.")
-    except multiprocessing.queues.Full:
-         in_flight_requests.pop(task_id, None) # Clean up future
-         console.print(f"[server] Task {task_id} [bold red]rejected[/bold red]: Task queue is full.")
-         raise HTTPException(status_code=503, detail="Server busy, task queue is full.")
+        # Offload the potentially blocking put operation to a thread so the event loop remains responsive.
+        await asyncio.to_thread(task_queue.put, (task_id, code_string))
+        # qsize() may not be implemented on some platforms; fall back gracefully.
+        try:
+            q_sz = task_queue.qsize()
+        except (NotImplementedError, AttributeError):
+            q_sz = "unknown"
+        console.print(f"[server] Task {task_id} added to queue (queue size: {q_sz}).")
     except Exception as e:
         in_flight_requests.pop(task_id, None) # Clean up future
         console.print(f"[server] Task {task_id} [bold red]rejected[/bold red]: Error adding to queue: {e}")

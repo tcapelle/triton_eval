@@ -243,17 +243,6 @@ def reward_code_runs(completions, tests, pt_stdout, **kwargs):
     else:
         # Running loop exists; run the coroutine and wait.
         return loop.run_until_complete(_compute_async())
-    finally:
-        # Always try to reset workers after processing a batch, regardless of success/failure
-        # Use a synchronous request here as reward_code_runs itself is synchronous.
-        try:
-            reset_endpoint = f"{SERVER_URL}/reset_workers"
-            # Use a reasonable timeout for the reset operation
-            response = requests.post(reset_endpoint, timeout=60.0)
-            response.raise_for_status() # Check for HTTP errors (4xx, 5xx)
-        except requests.exceptions.RequestException as e:
-            # Log error if reset fails, but don't let it crash the reward calculation
-            print(f"Error resetting workers after reward calculation: {e}")
 
 # ===== Static Code Analysis Rewards =====
 
