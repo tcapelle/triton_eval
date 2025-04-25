@@ -225,7 +225,7 @@ def reward_code_runs(completions, tests, pt_stdout, **kwargs):
 
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
-        tasks = [run_scorer_async(resp, tests[0], pt_stdout[0]) for resp in responses]
+        tasks = [run_scorer_async(resp, test, pt_std) for resp, test, pt_std in zip(responses, tests, pt_stdout)]
         run_scores = await asyncio.gather(*tasks)
         return [_compute_code_runs_reward(score) for score in run_scores]
 
