@@ -216,7 +216,7 @@ def _compute_code_runs_reward(run_output):
         return REWARD_MAGNITUDES["code_runs_match"]
 
 @weave.op
-def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
+def reward_code_runs(completions, tests, pt_stdout, **kwargs):
     """Synchronous wrapper around the async implementation.
 
     We build coroutines for all completions, execute them concurrently with
@@ -225,7 +225,7 @@ def reward_code_runs(completions, tests, pytorch_code_output, **kwargs):
 
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
-        tasks = [run_scorer_async(resp, tests[0], pytorch_code_output[0]) for resp in responses]
+        tasks = [run_scorer_async(resp, tests[0], pt_stdout[0]) for resp in responses]
         run_scores = await asyncio.gather(*tasks)
         return [_compute_code_runs_reward(score) for score in run_scores]
 

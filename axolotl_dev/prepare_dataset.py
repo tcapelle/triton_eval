@@ -55,7 +55,7 @@ def get_dataset(dataset_name, code_column, split="train", ):
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(pytorch_code=pytorch_code, entrypoint=entrypoint)},
-                {"role": "assistant", "content": "<think>"},
+                {"role": "assistant", "content": "<think>\n"},
             ],
         }
     
