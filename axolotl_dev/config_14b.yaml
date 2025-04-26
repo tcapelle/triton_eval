@@ -36,7 +36,7 @@ datasets:
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
-output_dir: /workspace/data/axolotl-artifacts/grpo-beta-zero-14b
+output_dir: /root/models/grpo-beta-zero-14b-v2
 
 dataloader_prefetch_factor: 32
 dataloader_num_workers: 2
