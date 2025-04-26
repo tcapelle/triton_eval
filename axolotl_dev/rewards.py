@@ -69,7 +69,7 @@ REWARD_MAGNITUDES = {
     "one_code_blob_ok": 0.2,
     "one_code_blob_not_ok": -0.2,
     "code_runs_fail": -0.25,
-    "code_runs_mismatch": 0.2,
+    "code_runs_mismatch": 0.7,
     "code_runs_match": 1.0,
     "imports_decorator_ok": 0.2,
     "constexpr_ok": 0.2,
