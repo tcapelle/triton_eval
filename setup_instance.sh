@@ -5,6 +5,10 @@ apt install -y tmux curl git
 # install python.h
 apt-get install python3.10-dev
 
+# git-lfs
+curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash
+apt-get install git-lfs
+
 # setup git
 git config --global user.email "tcapelle@pm.me"
 git config --global user.name "Thomas Capelle"
