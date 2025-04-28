@@ -13,17 +13,13 @@ from my_smol_agent.tools import remove_tests, extract_code, extract_tests, run_p
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-
-
 console = Console()
 
-client = openai.OpenAI(
-    base_url="http://0.0.0.0:8000/v1",
-)
+
+CUSTOM_BASE_URL = "http://0.0.0.0:8000/v1"
 
 # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
 MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
-
 # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
 # MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
@@ -35,12 +31,28 @@ AVAILABLE_GPUS = [4, 5, 6, 7]
 @dataclass
 class ScriptArgs:
     trials: int = 1
+    base_url: str = CUSTOM_BASE_URL
     model_name: str = MODEL_NAME
     temperature: float = TEMPERATURE
     max_tokens: int = 3000
     weave_project: str = "grpo-cuda/triton-bench"
     weave_dataset: str = "Tritonbench_T:v0"
     debug: bool = False
+
+console.rule("[bold green]Running Weave Eval[/bold green]")
+
+args = sp.parse(ScriptArgs)
+print(args)
+
+client = openai.OpenAI(
+    base_url=args.base_url,
+)
+weave.init(args.weave_project)
+
+ds = weave.ref(args.weave_dataset).get()
+if args.debug:
+    ds = ds.rows[:10]
+
 
 system_prompt = """
 You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters. 
@@ -110,7 +122,7 @@ def call_model(system_prompt: str, user_prompt: str, model_name: str = MODEL_NAM
 
 import weave
 
-class QwenCode(weave.Model):
+class OpenAICompatibleModel(weave.Model):
     "this is just a pydantic BaseModel subclass"
     model_name: str
     temperature: float
@@ -197,25 +209,14 @@ def one_code_blob(output):
 
 scorers = [run_scorer, think_scorer, one_code_blob]
 
-if __name__ == "__main__":
-    console.rule("[bold green]Running Weave Eval[/bold green]")
+qwen = OpenAICompatibleModel(
+    model_name=args.model_name,
+    temperature=args.temperature,
+    max_tokens=args.max_tokens,
+    system_prompt=system_prompt,
+    user_prompt=user_prompt,
+)
 
-    args = sp.parse(ScriptArgs)
-    print(args)
+evaluation = weave.Evaluation(dataset=ds, scorers=scorers, trials=args.trials)
 
-    weave.init(args.weave_project)
-
-    ds = weave.ref(args.weave_dataset).get()
-    if args.debug:
-        ds = ds.rows[:10]
-    evaluation = weave.Evaluation(dataset=ds, scorers=scorers, trials=args.trials)
-
-    qwen = QwenCode(
-        model_name=args.model_name,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-    )
-
-    asyncio.run(evaluation.evaluate(model=qwen))
+asyncio.run(evaluation.evaluate(model=qwen))
