@@ -5,23 +5,33 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+import weave
 import openai
 import simple_parsing as sp
 from rich.console import Console
 
-from my_smol_agent.tools import remove_tests, extract_code, extract_tests, run_python_code
+from my_smol_agent.tools import remove_tests, extract_code, run_python_code
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 console = Console()
 
+use_openai = False
 
-CUSTOM_BASE_URL = "http://0.0.0.0:8000/v1"
+if not use_openai:
+    CUSTOM_BASE_URL = "http://0.0.0.0:8000/v1"
+else:
+    CUSTOM_BASE_URL = None
 
-# MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
-MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
-# MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
-# MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+if not use_openai:
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+    MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206"
+else:
+    MODEL_NAME = "o4-mini-2025-04-16"
+
 
 
 TEMPERATURE = 0.0
@@ -36,7 +46,7 @@ class ScriptArgs:
     temperature: float = TEMPERATURE
     max_tokens: int = 3000
     weave_project: str = "grpo-cuda/triton-bench"
-    weave_dataset: str = "Tritonbench_T:v0"
+    weave_dataset: str = "Tritonbench_T:v2"
     debug: bool = False
 
 console.rule("[bold green]Running Weave Eval[/bold green]")
@@ -53,31 +63,6 @@ ds = weave.ref(args.weave_dataset).get()
 if args.debug:
     ds = ds.rows[:10]
 
-
-system_prompt = """
-You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters. 
-
-# Instructions
-- Ensure that the wrapper function fully corresponds to the provided function information.
-- Generate a detailed plan on how to convert and optimize the Pytorch code to a Triton kernel before writing the code.
-- The reasoning process MUST BE enclosed within <think> and </think> tags."
-- Reply with the thinking process and a single blob of code surrounded with ```python and ```.
-"""
-
-user_prompt = """Convert the following PyTorch code to a Triton kernel.
-Pytorch code:
-```python
-{pt_code}```
-
-The function should have the same name as the PyTorch function. 
-
-Don't forget to format your answer as:
-<think>
-thinking process
-</think>
-```python
-code
-```"""
 
 ## TRAINING PROMPT ###########################
 system_prompt = """
@@ -108,19 +93,26 @@ code
 ##############################################
 
 
-def call_model(system_prompt: str, user_prompt: str, model_name: str = MODEL_NAME, temperature: float = TEMPERATURE, **model_kwargs):
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "system", "content": system_prompt}, 
-                  {"role": "user", "content": user_prompt}],
-        temperature=temperature,
-        **model_kwargs,
-    )
-    return response.choices[0].message.content.strip()
+def call_model(system_prompt: str, user_prompt: str, model_name: str, **model_kwargs):
+    "Use reponse API for o3/o4 models, otherwise use chat completion"
+    if model_name.startswith("o"):
+        out = client.responses.create(
+            model=model_name,
+            input=[{"role": "system", "content": system_prompt}, 
+                    {"role": "user", "content": user_prompt}],
+            reasoning={"effort": "high"},
+            ).output_text.strip()
+    else:
+        out = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "system", "content": system_prompt}, 
+                        {"role": "user", "content": user_prompt}],
+            **model_kwargs
+        ).choices[0].message.content.strip()
+    return out
 
 
 
-import weave
 
 class OpenAICompatibleModel(weave.Model):
     "this is just a pydantic BaseModel subclass"
@@ -139,38 +131,30 @@ class OpenAICompatibleModel(weave.Model):
             self.system_prompt, 
             self.user_prompt.format(pt_code=code), 
             self.model_name, 
-            self.temperature,
-            max_tokens=self.max_tokens,
-            )
+            temperature=self.temperature, 
+            max_tokens=self.max_tokens)
         return out
     
-# tritonbench_t_files = Path("/workspace/triton_eval/TritonBench/data/TritonBench_T_v1/")
-# # this is just a list of all files in tritonbech_t_files
-# tritonbench_t_ds = [{"filename": f, "pt_code": read_file(f)} for f in list(tritonbench_t_files.glob("**/*.py"))]
-# wds = weave.Dataset(name="Tritonbench_T", description="The dataset from the paper: https://github.com/thunlp/TritonBench",rows=tritonbench_t_ds)
-# weave.publish(wds)
-
 
 @weave.op
-def run_scorer(output, pt_code):
+def run_scorer(output, tests, stdout, runs):
     "Runs the code and returns the output"
-
-    # run pt code
     gpu_id = random.choice(AVAILABLE_GPUS)
-    pt_output = run_python_code(pt_code, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
-
+    
+    # get triton from model output
     triton_code = extract_code(output)
-    tests = extract_tests(pt_code)
 
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     # Run the triton code
     triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
+    triton_runs = triton_output["status_code"] == 0
+    triton_stdout = triton_output["stdout"]
+    match = (stdout == triton_stdout and runs and triton_runs)
 
-    match = pt_output["stdout"] == triton_output["stdout"] and pt_output["status_code"] == 0 and triton_output["status_code"] == 0
-
-    return {"triton_runs": triton_output["status_code"] == 0,
-            "pt_runs": pt_output["status_code"] == 0,
+    return {"triton_runs": triton_runs,
+            "triton_stdout": triton_stdout,
+            "pt_runs": runs,
             "match": match}
 
 @weave.op
@@ -209,7 +193,7 @@ def one_code_blob(output):
 
 scorers = [run_scorer, think_scorer, one_code_blob]
 
-qwen = OpenAICompatibleModel(
+weave_model = OpenAICompatibleModel(
     model_name=args.model_name,
     temperature=args.temperature,
     max_tokens=args.max_tokens,
@@ -217,6 +201,6 @@ qwen = OpenAICompatibleModel(
     user_prompt=user_prompt,
 )
 
-evaluation = weave.Evaluation(dataset=ds, scorers=scorers, trials=args.trials)
+evaluation = weave.Evaluation(dataset=ds, scorers=scorers, trials=args.trials, evaluation_name=args.model_name)
 
-asyncio.run(evaluation.evaluate(model=qwen))
+asyncio.run(evaluation.evaluate(model=weave_model))
