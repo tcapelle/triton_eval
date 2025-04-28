@@ -5,8 +5,7 @@ description = "A simple triton/cuda execution framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.6+cu126; sys_platform != 'darwin'",
-    "torch; sys_platform == 'darwin'",
+    "torch==2.6",
     "numpy",
     "pydantic",
     "setuptools",
@@ -19,20 +18,15 @@ dependencies = [
     "weave>=0.51.42",
     "smolagents>=1.13.0",
     "ipykernel>=6.29.5",
+    "vllm>=0.8.4",
+    "trl",
 ]
-
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu126", marker = "sys_platform != 'darwin'"},
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
 
 [tool.setuptools]
 packages = ["triton_eval"]
+
+[tool.uv.sources]
+trl = { git = "https://github.com/huggingface/trl.git", rev = "0dad4eb7ca8de6f93a76752a5773c0baecd4a3d3" }
 
 [dependency-groups]
 dev = [
