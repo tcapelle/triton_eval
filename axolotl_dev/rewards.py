@@ -179,9 +179,11 @@ def one_code_blob_reward(completions, **kwargs):
     for response in responses:
         # The scorer now handles removing the think block internally
         code_blob_score = one_code_blob(response)
+        code_length = code_blob_score["code_length"]
+        code_length = max(code_length - 5000, 0)
         ok = code_blob_score["one_code_blob_ok"]
         # Penalize more heavily if no code blob found after removing think
-        reward = REWARD_MAGNITUDES["one_code_blob_ok"] * math.exp(-code_blob_score["code_length"]/1000) if ok else REWARD_MAGNITUDES["one_code_blob_not_ok"]
+        reward = REWARD_MAGNITUDES["one_code_blob_ok"] * math.exp(-code_length/1000) if ok else REWARD_MAGNITUDES["one_code_blob_not_ok"]
         rewards.append(reward)
     return rewards
 
