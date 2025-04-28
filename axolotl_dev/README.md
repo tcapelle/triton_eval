@@ -9,6 +9,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 axolotl vllm-serve config_14b.yaml  --tensor-parall
 ## Rewards server
 
 ```bash
+# maybe?
+ssh -L 9347:localhost:9347 root@10.0.3.241
+```
+
+```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 python server.py
 ```
 
