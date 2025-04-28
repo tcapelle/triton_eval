@@ -1,21 +1,23 @@
+import yaml
 import random  
 import weave
+import wandb
 import math
 import subprocess
+import tempfile
 import re
 import torch
 import os
 import httpx
 import asyncio
 import torch.distributed as dist
-import requests
 import logging
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
-    if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+    if dist.is_initialized() and dist.get_rank() == 0:
         weave.init("grpo-cuda/axolotl-grpo")
 except:
     # If not in distributed mode or any other error, initialize weave anyway
@@ -69,7 +71,7 @@ REWARD_MAGNITUDES = {
     "one_code_blob_ok": 0.2,
     "one_code_blob_not_ok": -0.2,
     "code_runs_fail": -0.25,
-    "code_runs_mismatch": 0.7,
+    "code_runs_mismatch": 0.2,
     "code_runs_match": 1.0,
     "imports_decorator_ok": 0.2,
     "constexpr_ok": 0.2,
@@ -78,6 +80,19 @@ REWARD_MAGNITUDES = {
     "torch_empty_penalty": -0.1,
     "torch_zeros_ok": 0.1,
 }
+
+try:
+    if dist.is_initialized() and dist.get_rank() == 0:
+        if wandb.run is not None:
+            # we want to savbe the Reward magnitudes to wandb
+            # let's dump them to a temp file first, yaml
+            temp_file = tempfile.NamedTemporaryFile(delete=False)
+            yaml.dump(REWARD_MAGNITUDES, temp_file)
+            wandb.save(temp_file.name)
+            wandb.config.update({"reward_magnitudes": REWARD_MAGNITUDES})
+except:
+    pass
+
 
 # List of valid triton.language methods
 # Sourced from triton.__dir__() and filtering for relevant functions
