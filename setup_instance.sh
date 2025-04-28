@@ -32,5 +32,6 @@ elif [ -f ~/base/bin/activate ]; then
 fi
 " >> ~/.bashrc
 
+echo "export VLLM_USE_V1=0" >> ~/.bashrc
 # TRL setup
 # pip install git+https://github.com/huggingface/trl.git@0dad4eb7ca8de6f93a76752a5773c0baecd4a3d3
