@@ -140,7 +140,7 @@ def think(thought: str) -> str:
 
 DEFAULT_TOOLS = [
     run_python_code,
-    save_to_file,
-    read_file,
-    think,
+    # save_to_file,
+    # read_file,
+    # think,
 ]

@@ -26,9 +26,11 @@ else:
 if not use_openai:
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
+    MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
-    MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206-v1"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-309-v2"
 else:
     MODEL_NAME = "o4-mini-2025-04-16"
 
@@ -46,7 +48,7 @@ class ScriptArgs:
     temperature: float = TEMPERATURE
     max_tokens: int = 3000
     weave_project: str = "grpo-cuda/triton-bench"
-    weave_dataset: str = "Tritonbench_T:v2"
+    weave_dataset: str = "Tritonbench_T_v2:latest"
     debug: bool = False
 
 console.rule("[bold green]Running Weave Eval[/bold green]")
@@ -100,7 +102,7 @@ def call_model(system_prompt: str, user_prompt: str, model_name: str, **model_kw
             model=model_name,
             input=[{"role": "system", "content": system_prompt}, 
                     {"role": "user", "content": user_prompt}],
-            reasoning={"effort": "high"},
+            reasoning={"effort": "medium"},
             ).output_text.strip()
     else:
         out = client.chat.completions.create(
