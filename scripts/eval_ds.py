@@ -40,7 +40,7 @@ if args.from_hub:
     console.rule(f"[bold blue]Loading dataset: {args.dataset_name}[/bold blue]")
     ds = load_dataset(args.dataset_name, split="train")
     if args.debug:
-        ds = ds.select(range(10))
+        ds = ds.select(range(5))
 else:
     console.rule(f"[bold blue]Loading dataset: {args.dataset_name}[/bold blue]")
     ds = list(weave.ref(args.dataset_name).get().rows)
@@ -88,8 +88,8 @@ def split_at_tests(code):
         return parts[0], ""
     code, tests = parts[0], parts[1]
     # remove the ```python at the beginning and end of the code
-    header="import torch\ntorch.manual_seed(42)\n\nDEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'\n"
-    code = header + "\n\n" + code
+    header="import torch\ntorch.manual_seed(42)\n\nDEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
+    tests = header + "\n\n" + tests
     return code, tests
 
 
@@ -139,7 +139,15 @@ print(test_add())
     console.rule("Running on small dataset")
     rows_mapped = []
     for row in ds:
-        _ = run_code(row)
+        res = run_code(row)
+        row.update(res)
+        rows_mapped.append(row)
+
+    console.rule("Fixing imports")
+    rows_mapped = []
+    for row in ds:
+        res = fix_test_imports(row)
+        row.update(res)
         rows_mapped.append(row)
 
     wds = weave.Dataset(name=f"{args.dataset_name}_debug", rows=rows_mapped)
