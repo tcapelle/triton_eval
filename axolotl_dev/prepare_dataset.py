@@ -6,8 +6,9 @@ from rich.pretty import pprint
 
 @dataclass
 class Args:
-    dataset_name: str = "tcapelle/train_ds_triton"#"GPUMODE/Inductor_Created_Data_Permissive"
-    code_column: str = "pt_code"
+    dataset_name: str = "tcapelle/train_ds_triton_v2f2"#"GPUMODE/Inductor_Created_Data_Permissive"
+    prepared_dataset_name: str = "tcapelle/train_ds_triton"
+    code_column: str = "pt_code_without_tests"
 
 
 SYSTEM_PROMPT = """
@@ -36,7 +37,7 @@ code
 ```"""
 
 
-def get_dataset(dataset_name, code_column, split="train", ):
+def get_dataset(dataset_name, code_column, split="train"):
     # Load the dataset - this is expected to be preprocessed by prepare_dataset.py
     data = load_dataset(dataset_name)[split]
     print(f"Loaded {len(data)} examples from {dataset_name} split {split}")
@@ -68,4 +69,4 @@ if __name__ == "__main__":
     args = sp.parse(Args)
     dataset = get_dataset(args.dataset_name, args.code_column, split="train")
     # dataset.save_to_disk("train_dataset")
-    dataset.push_to_hub("tcapelle/train_ds_triton", commit_message="push prepared")
+    dataset.push_to_hub(args.prepared_dataset_name, commit_message="push prepared")

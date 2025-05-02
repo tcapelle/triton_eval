@@ -86,24 +86,17 @@ def split_at_tests(code):
     parts = re.split(r"^#{4,}", code, 1, flags=re.MULTILINE)
     if len(parts) == 1:
         return parts[0], ""
-    return parts[0], parts[1]
+    code, tests = parts[0], parts[1]
+    # remove the ```python at the beginning and end of the code
+    header="import torch\ntorch.manual_seed(42)\n\nDEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'\n"
+    code = header + "\n\n" + code
+    return code, tests
 
 
-def check_test_imports(row):
+def fix_test_imports(row):
     tests = row["tests"]
-    system_prompt = """You are an expert Python programmer, we want all our tests to start with the top of the file with:
-    ```python
-    import torch
-    torch.manual_seed(42)
-
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    ```
-    Instructions:
-    - You only modify the headers, nothing else!
-    - Please format the code to match this format.
-    - Reply with the code only, nothing else. 
-    - Do not include any other text or comments.
-    - Don't include ```python at the beginning or end. Code only.
+    system_prompt = """You are an expert Python programmer, your task is removing duplicate lines from the code.
+    Repond with the cleaned code only, nothing else. Don't put any other text or comments. Don't include ```python at the beginning or end. Code only.
     """
 
     user_prompt = f"Please format the following code to match the format above:\n```python\n{tests}\n```"
@@ -162,7 +155,7 @@ if not args.debug:
     console.print(f"[bold blue]Number of rows that ran:[/bold blue] {sum(row['pt_code_runs'] for row in ds)}")
 
     if args.fix_imports:
-        ds = ds.map(check_test_imports, num_proc=20)
+        ds = ds.map(fix_test_imports, num_proc=20)
 
     if args.push:
         # push to hub
