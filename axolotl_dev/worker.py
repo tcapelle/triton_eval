@@ -125,9 +125,15 @@ def worker_main(task_queue, result_queue, gpu_id):
             # 3. Clean up the temporary file
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
+                    print(f"[Worker PID {os.getpid()}] Task {task_id} attempting to remove temp file: {temp_file_path}", file=original_stderr_for_logging, flush=True)
                     os.remove(temp_file_path)
+                    print(f"[Worker PID {os.getpid()}] Task {task_id} successfully removed temp file: {temp_file_path}", file=original_stderr_for_logging, flush=True)
                 except OSError as rm_e:
                     print(f"[Worker PID {os.getpid()}] Error removing temp file {temp_file_path}: {rm_e}", file=original_stderr_for_logging, flush=True)
+            elif temp_file_path:
+                print(f"[Worker PID {os.getpid()}] Task {task_id} temp file {temp_file_path} did not exist, skipping removal.", file=original_stderr_for_logging, flush=True)
+            else:
+                print(f"[Worker PID {os.getpid()}] Task {task_id} no temp file path recorded, skipping removal.", file=original_stderr_for_logging, flush=True)
 
             # 4. Exit worker ONLY if a fatal error occurred (should_exit == True)
             if should_exit:

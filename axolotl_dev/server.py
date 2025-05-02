@@ -31,7 +31,7 @@ except ImportError:
 CONCURRENCY_PER_GPU = 2
 WORKER_COUNT = NUM_GPUS * CONCURRENCY_PER_GPU
 TASK_TIMEOUT_SECONDS = 60 # Timeout for each task execution in seconds (e.g., 2 minutes)
-WORKER_JOIN_TIMEOUT = 10 # Seconds to wait for worker processes to join gracefully
+WORKER_JOIN_TIMEOUT = 20 # Seconds to wait for worker processes to join gracefully
 
 # Queues and shared state
 task_queue = multiprocessing.Queue()
@@ -244,6 +244,7 @@ class WorkerPool:
                 proc = self._workers[idx].process
                 if proc.is_alive(): # Check if still alive after join attempt
                     alive_after_join.append(proc.pid)
+                    console.print(f"[pool] [yellow]Worker PID {proc.pid} did not exit within timeout. Terminating...[/yellow]") # Added logging
                     proc.terminate()
                     terminated += 1
                 elif isinstance(res, Exception):
