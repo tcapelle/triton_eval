@@ -34,6 +34,11 @@ thinking process
 </think>
 
 ```python
+import torch
+
+# relevant imports
+from typing import ...
+
 def {entrypoint}(...):
     ...
 ```"""
