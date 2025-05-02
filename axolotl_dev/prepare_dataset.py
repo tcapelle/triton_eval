@@ -32,8 +32,10 @@ Don't forget to format your answer as:
 <think>
 thinking process
 </think>
+
 ```python
-code
+def {entrypoint}(...):
+    ...
 ```"""
 
 
