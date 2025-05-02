@@ -177,13 +177,13 @@ def check_tests_signature(row):
     "We should have a test that match the entrypoint -> test_<entrypoint>"
     tests = row["tests"]
     if tests == "":
-        print("Error: tests is empty")
+        console.print("[bold red]Error: tests is empty[/bold red]")
         return False
     entrypoint = row["entrypoint"]
     if f"test_{entrypoint}" not in tests:
         actual_tests = _get_test_signature(tests)
-        print(f"Error: test_{entrypoint} not in tests")
-        print(f"Actual tests: {actual_tests}")
+        console.print(f"[bold red]Error: test_{entrypoint} not in tests[/bold red]")
+        console.print(f"[bold red]Actual tests: {actual_tests}[/bold red]")
         return False
     return True
 
@@ -284,8 +284,6 @@ if not args.debug:
     if args.run_code:
         ds = ds.map(run_code, num_proc=8)
 
-    
-
 
     # print some stats:
     console.print(f"[bold blue]Stats:[/bold blue]")
@@ -296,17 +294,21 @@ if not args.debug:
         ds = ds.map(fix_test_imports, num_proc=20)
 
     checks_pass = True
-    fds = ds.filter(lambda x: not check_tests_signature(x))
-    print(f"Number of rows that failed tests signature check: {len(fds)}")
-    if len(fds) > 0:
+    fds = ds.filter(lambda x: check_tests_signature(x))
+    diff = len(ds) - len(fds)
+    console.print(f"Number of rows that failed tests signature check: {diff}")
+    if diff > 0:
         checks_pass = False
 
-    fds = ds.filter(lambda x: not check_entrypoint_name(x))
-    print(f"Number of rows that failed entrypoint name check: {len(fds)}")
-    if len(fds) > 0:
+    ffds = fds.filter(lambda x: check_entrypoint_name(x))
+    diff = len(ffds) - len(fds)
+    console.print(f"Number of rows that failed entrypoint name check: {diff}")
+    if diff > 0:
         checks_pass = False
 
-    if args.push and checks_pass:
+    ds = ffds
+    
+    if args.push:
         # push to hub
         ds.push_to_hub(args.dataset_name, commit_message="fixed")
 

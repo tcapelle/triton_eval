@@ -1,7 +1,8 @@
+import weave
+
 from datasets import load_dataset
 from dataclasses import dataclass
 import simple_parsing as sp
-import re
 from rich.pretty import pprint
 
 @dataclass
@@ -54,7 +55,10 @@ def get_dataset(dataset_name, code_column, split="train"):
     print(f"Filtered to {len(data)} examples with non-None entrypoint")
     data = data.filter(lambda x: x["tests"] is not None)
     print(f"Filtered to {len(data)} examples with non-None tests")
+    data = data.filter(lambda x: x["pt_code_runs"])
+    print(f"Filtered to {len(data)} examples with non-None pt_code_runs")
 
+    # Format the prompt with the preprocessed code
     def format_example(example):
         # Format the prompt with the preprocessed code
         pytorch_code = example[code_column]
@@ -77,3 +81,7 @@ if __name__ == "__main__":
     dataset = get_dataset(args.dataset_name, args.code_column, split="train")
     # dataset.save_to_disk("train_dataset")
     dataset.push_to_hub(args.prepared_dataset_name, commit_message="push prepared")
+
+    weave.init("grpo-cuda/axolotl-grpo")
+    wds = weave.Dataset(rows=dataset.to_list(), name="train_ds_triton")
+    weave.publish(wds)
