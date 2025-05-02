@@ -79,6 +79,7 @@ REWARD_MAGNITUDES = {
     "masks_load_store_ok": 0.1,
     "torch_empty_penalty": -0.1,
     "torch_zeros_ok": 0.1,
+    "exp_penalty": 0.5,
 }
 
 try:
@@ -148,7 +149,7 @@ def think_reward(completions, **kwargs):
         ok = think_score["thinking_ok"]
         thinking_length = think_score["thinking_length"]
         thinking_length = max(thinking_length - 5000, 0)
-        reward = REWARD_MAGNITUDES["think_ok"] * math.exp(-thinking_length/1000) if ok else REWARD_MAGNITUDES["think_not_ok"]
+        reward = REWARD_MAGNITUDES["think_ok"] * math.exp(-REWARD_MAGNITUDES["exp_penalty"]*thinking_length/1000) if ok else REWARD_MAGNITUDES["think_not_ok"]
         rewards.append(reward)
     return rewards
 
@@ -183,7 +184,7 @@ def one_code_blob_reward(completions, **kwargs):
         code_length = max(code_length - 5000, 0)
         ok = code_blob_score["one_code_blob_ok"]
         # Penalize more heavily if no code blob found after removing think
-        reward = REWARD_MAGNITUDES["one_code_blob_ok"] * math.exp(-code_length/1000) if ok else REWARD_MAGNITUDES["one_code_blob_not_ok"]
+        reward = REWARD_MAGNITUDES["one_code_blob_ok"] * math.exp(-REWARD_MAGNITUDES["exp_penalty"]*code_length/1000) if ok else REWARD_MAGNITUDES["one_code_blob_not_ok"]
         rewards.append(reward)
     return rewards
 
@@ -237,7 +238,7 @@ def _compute_code_runs_reward(run_output):
         return REWARD_MAGNITUDES["code_runs_match"]
 
 @weave.op
-def reward_code_runs(completions, tests, pt_stdout, **kwargs):
+def reward_code_runs(completions, tests, stdout, **kwargs):
     """Synchronous wrapper around the async implementation.
 
     We build coroutines for all completions, execute them concurrently with
@@ -246,7 +247,7 @@ def reward_code_runs(completions, tests, pt_stdout, **kwargs):
 
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
-        tasks = [run_scorer_async(resp, test, pt_std) for resp, test, pt_std in zip(responses, tests, pt_stdout)]
+        tasks = [run_scorer_async(resp, test, pt_std) for resp, test, pt_std in zip(responses, tests, stdout)]
         run_scores = await asyncio.gather(*tasks)
         return [_compute_code_runs_reward(score) for score in run_scores]
 
