@@ -18,9 +18,10 @@ console = Console()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/train_ds_triton_v2f"
+    input_dataset: str = "tcapelle/train_ds_triton_v2f2"
     output_dataset: str = "train_ds_triton_v2f2"
     weave_project: str = "grpo-cuda/dataset_agent"
+    push: bool = False
 
 
 args = sp.parse(Args)
@@ -57,6 +58,9 @@ def func_to_map(row):
 
     pytorch_code = row["format_pt_code"]
     entrypoint = row["entrypoint"]
+    runs = row["pt_code_runs"]
+    if runs:
+        return row
     try:
         agent = Agent(model_name="o4-mini", system_message=pytorch_agent_prompt, silent=True, response_format=PytorchCodeWithTests)
         agent_response = agent.run(
@@ -97,3 +101,6 @@ if args.debug:
 else:
     pds = input_ds.map(func_to_map, num_proc=10)
     pds.save_to_disk(args.output_dataset)
+
+    if args.push:
+        pds.push_to_hub(args.output_dataset)
