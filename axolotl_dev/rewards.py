@@ -62,9 +62,7 @@ async def _run_code_on_server(code: str, tests: str) -> dict:
                                      timeout=180.0)
             resp.raise_for_status()
             data = resp.json()
-            return {"stdout": data.get("stdout", ""),
-                    "stderr": data.get("stderr", ""),
-                    "status_code": data.get("status_code", -1)}
+            return data
         except httpx.HTTPStatusError as e:
             # 503, 504, 500… – treat as execution failure
             return {"stdout": "", "stderr": str(e), "status_code": -1}
@@ -218,7 +216,7 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
 
     triton_code = extract_code(output)
     if len(triton_code) < 10:
-        return {"triton_runs": False, "match": False}
+        return {"triton_runs": False, "correct": False}
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     if RUN_ON_SERVER:
@@ -228,29 +226,28 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
         try:
             triton_output = run_python_code(triton_and_test, env)
         except subprocess.TimeoutExpired:
-            return {"triton_runs": False, "match": False}
+            return {"triton_runs": False, "correct": False}
 
     runs = triton_output["status_code"] == 0
-    match = pytorch_code_output == triton_output["stdout"] and runs
+    correct = pytorch_code_output == triton_output["stdout"] and runs
 
     result = {
         "triton_runs": runs,
-        "match": match
+        "correct": correct
         }
     
     # the full payload for debugging and weave capture
     if RUN_ON_SERVER:
-        result["stdout"] = triton_output["stdout"]
-        result["stderr"] = triton_output["stderr"]
-    return result
+        triton_output.update(result)
+    return triton_output
 
 def _compute_code_runs_reward(run_output):
-    "If the code doesn't run, renturn -1, it if runs but doesn't match, return 0, otherwise return 1"
+    "If the code doesn't run, return -1, if it runs but isn't correct, return 0, otherwise return 1"
     triton_runs = run_output["triton_runs"]
-    match = run_output["match"]
+    correct = run_output["correct"]
     if not triton_runs:
         return REWARD_MAGNITUDES["code_runs_fail"]
-    elif not match:
+    elif not correct:
         return REWARD_MAGNITUDES["code_runs_mismatch"]
     else:
         return REWARD_MAGNITUDES["code_runs_match"]
@@ -262,7 +259,7 @@ def reward_code_runs(completions, tests, stdout, **kwargs):
     We build coroutines for all completions, execute them concurrently with
     `asyncio.gather`, and then return the computed rewards.
     """
-
+    
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
         tasks = [run_scorer_async(resp, test, pt_std) for resp, test, pt_std in zip(responses, tests, stdout)]

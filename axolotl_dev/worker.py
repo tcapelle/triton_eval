@@ -14,6 +14,10 @@ import tempfile # Add tempfile
 import importlib.util # Add importlib.util
 import uuid # Add uuid for unique module names
 
+# Added imports for monitoring
+import pynvml
+import psutil
+
 def is_fatal_error(exception) -> bool:
     """Checks if an exception should cause the worker to terminate."""
     # Triton compilation errors are considered fatal
@@ -33,7 +37,7 @@ def worker_main(task_queue, result_queue, gpu_id):
       - Pins itself to a specific GPU
       - Waits for code from the master process (server)
       - Executes the code via exec()
-      - Returns stdout/stderr and status_code
+      - Returns stdout/stderr, status_code, and resource metrics
       - Exits only if a CUDA/Triton compilation error occurs, otherwise reports errors and continues.
     """
     # Pin GPU via environment (so torch sees only 1 device)
@@ -41,7 +45,25 @@ def worker_main(task_queue, result_queue, gpu_id):
 
     original_stderr_for_logging = sys.__stderr__ # Capture original stderr early
 
-    print(f"[Worker PID {os.getpid()}] Bound to GPU {gpu_id}. Importing libraries...", file=original_stderr_for_logging, flush=True)
+    print(f"[Worker PID {os.getpid()}] Bound to GPU {gpu_id}. Initializing monitoring...", file=original_stderr_for_logging, flush=True)
+
+    # --- Monitoring Setup ---
+    nvml_initialized = False
+    gpu_handle = None
+    try:
+        pynvml.nvmlInit()
+        nvml_initialized = True
+        # Even though CUDA_VISIBLE_DEVICES is set, nvml still sees all GPUs.
+        # We need to get the handle for the *correct* GPU based on the original gpu_id.
+        gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+        print(f"[Worker PID {os.getpid()}] NVML initialized successfully for GPU {gpu_id}.", file=original_stderr_for_logging, flush=True)
+    except pynvml.NVMLError as nvml_err:
+        print(f"[Worker PID {os.getpid()}] [WARN] Failed to initialize NVML or get GPU handle: {nvml_err}", file=original_stderr_for_logging, flush=True)
+        # Worker can continue, but GPU metrics won't be available
+    # --- End Monitoring Setup ---
+
+
+    print(f"[Worker PID {os.getpid()}] Importing libraries...", file=original_stderr_for_logging, flush=True)
 
     while True:
         task_id, code_string = task_queue.get()
@@ -104,12 +126,40 @@ def worker_main(task_queue, result_queue, gpu_id):
             result_stdout = mystdout.getvalue()
             result_stderr = mystderr.getvalue() # Contains potential traceback from except blocks
 
-            # 2. Send result back to the server
+            # --- Collect Metrics ---
+            gpu_mem_used_gb = None
+            cpu_percent = None
+            ram_percent = None
+
+            if gpu_handle:
+                try:
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
+                    gpu_mem_used_gb = mem_info.used / (1024**3) # Convert bytes to GiB
+                except pynvml.NVMLError as nvml_err:
+                     print(f"[Worker PID {os.getpid()}] [WARN] Failed to get GPU memory info: {nvml_err}", file=original_stderr_for_logging, flush=True)
+
+            try:
+                # Get CPU percent over the last interval (non-blocking)
+                # First call returns 0.0 or None, subsequent calls give usage since last call.
+                # Calling it here measures usage *during* the finally block, which isn't ideal,
+                # but it's simple. A better approach might involve measuring before/after exec.
+                # Let's just get the current system-wide usage for simplicity.
+                psutil.cpu_percent(interval=None) # Initialize if first call
+                cpu_percent = psutil.cpu_percent(interval=None)
+                ram_percent = psutil.virtual_memory().percent
+            except Exception as psutil_err:
+                print(f"[Worker PID {os.getpid()}] [WARN] Failed to get CPU/RAM info: {psutil_err}", file=original_stderr_for_logging, flush=True)
+            # --- End Collect Metrics ---
+
+            # 2. Send result back to the server (including metrics)
             result = {
                 "task_id": task_id,
                 "status_code": status_code,
                 "stdout": result_stdout,
-                "stderr": result_stderr
+                "stderr": result_stderr,
+                "gpu_mem_used_gb": gpu_mem_used_gb,
+                "cpu_percent": cpu_percent,
+                "ram_percent": ram_percent,
             }
             try:
                  result_queue.put(result, timeout=5)
@@ -143,3 +193,12 @@ def worker_main(task_queue, result_queue, gpu_id):
 
     # End of worker_main function (reached only on poison pill or fatal error)
     print(f"[Worker PID {os.getpid()}] Worker main loop finished. Process exiting.", file=original_stderr_for_logging, flush=True)
+
+    # --- Shutdown Monitoring ---
+    if nvml_initialized:
+        try:
+            pynvml.nvmlShutdown()
+            print(f"[Worker PID {os.getpid()}] NVML shut down successfully.", file=original_stderr_for_logging, flush=True)
+        except pynvml.NVMLError as nvml_err:
+            print(f"[Worker PID {os.getpid()}] [WARN] Failed to shut down NVML: {nvml_err}", file=original_stderr_for_logging, flush=True)
+    # --- End Shutdown Monitoring ---

@@ -28,7 +28,7 @@ except ImportError:
     console.print("[server] [yellow]Warning:[/yellow] torch not installed, defaulting to 1 GPU.")
     NUM_GPUS = 1
 
-CONCURRENCY_PER_GPU = 2
+CONCURRENCY_PER_GPU = 1
 WORKER_COUNT = NUM_GPUS * CONCURRENCY_PER_GPU
 TASK_TIMEOUT_SECONDS = 60 # Timeout for each task execution in seconds (e.g., 2 minutes)
 WORKER_JOIN_TIMEOUT = 20 # Seconds to wait for worker processes to join gracefully
@@ -51,6 +51,10 @@ class CodeExecutionResponse(BaseModel):
     status_code: int
     stdout: str = ""
     stderr: str = ""
+    # Added fields for metrics
+    gpu_mem_used_gb: Optional[float] = None
+    cpu_percent: Optional[float] = None
+    ram_percent: Optional[float] = None
 
 # --- Lifespan Context Manager ---
 @asynccontextmanager
@@ -423,6 +427,10 @@ async def run_code_endpoint(request: CodeExecutionRequest):
             status_code=result["status_code"],
             stdout=result["stdout"],
             stderr=result["stderr"],
+            # Extract metrics from result dict
+            gpu_mem_used_gb=result.get("gpu_mem_used_gb"),
+            cpu_percent=result.get("cpu_percent"),
+            ram_percent=result.get("ram_percent"),
         )
     except asyncio.TimeoutError:
         console.print(f"[server] Task {task_id} [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS} seconds.")
