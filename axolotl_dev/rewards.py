@@ -12,6 +12,7 @@ import httpx
 import asyncio
 import torch.distributed as dist
 import logging
+from contextlib import nullcontext
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -34,6 +35,19 @@ from tools import extract_code, run_python_code  # run_python_in_process no long
 SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
 RUN_CODE_ENDPOINT = f"{SERVER_URL}/run_code"
 
+def get_wandb_run():
+    if wandb.run is None:
+        return None
+    return wandb.run
+
+def wandb_attributes():
+    "Add the wandb metrics as weave attributes"
+    if wandb.run is None:
+        return nullcontext()
+    else:
+        run = wandb.run
+        wandb_metrics = {k: v for k, v in dict(run.summary).items() if not k.startswith("_")}
+        return weave.attributes(wandb_metrics)
 
 async def _run_code_on_server(code: str, tests: str) -> dict:
     """Synchronously execute Triton `code` + `tests` on the remote worker pool.
@@ -82,7 +96,7 @@ REWARD_MAGNITUDES = {
     "exp_penalty": 0.5,
 }
 
-try:
+try: # this is not working, we are not saving the reward magnitudes to wandb
     if dist.is_initialized() and dist.get_rank() == 0:
         if wandb.run is not None:
             # we want to savbe the Reward magnitudes to wandb
@@ -93,6 +107,8 @@ try:
             wandb.config.update({"reward_magnitudes": REWARD_MAGNITUDES})
 except:
     pass
+
+
 
 
 # List of valid triton.language methods
@@ -145,10 +161,11 @@ def think_reward(completions, **kwargs):
     responses = [completion[0]['content'] for completion in completions]
     rewards = []
     for response in responses:
-        think_score = think_scorer(response)
-        ok = think_score["thinking_ok"]
-        thinking_length = think_score["thinking_length"]
-        thinking_length = max(thinking_length - 5000, 0)
+        with wandb_attributes():
+            think_score = think_scorer(response)
+            ok = think_score["thinking_ok"]
+            thinking_length = think_score["thinking_length"]
+            thinking_length = max(thinking_length - 5000, 0)
         reward = REWARD_MAGNITUDES["think_ok"] * math.exp(-REWARD_MAGNITUDES["exp_penalty"]*thinking_length/1000) if ok else REWARD_MAGNITUDES["think_not_ok"]
         rewards.append(reward)
     return rewards
@@ -179,7 +196,8 @@ def one_code_blob_reward(completions, **kwargs):
     rewards = []
     for response in responses:
         # The scorer now handles removing the think block internally
-        code_blob_score = one_code_blob(response)
+        with wandb_attributes():
+            code_blob_score = one_code_blob(response)
         code_length = code_blob_score["code_length"]
         code_length = max(code_length - 5000, 0)
         ok = code_blob_score["one_code_blob_ok"]
@@ -248,7 +266,8 @@ def reward_code_runs(completions, tests, stdout, **kwargs):
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
         tasks = [run_scorer_async(resp, test, pt_std) for resp, test, pt_std in zip(responses, tests, stdout)]
-        run_scores = await asyncio.gather(*tasks)
+        with wandb_attributes():
+            run_scores = await asyncio.gather(*tasks)
         return [_compute_code_runs_reward(score) for score in run_scores]
 
     try:
@@ -287,7 +306,8 @@ def imports_decorator_reward(completions, **kwargs):
         if not triton_code:
             rewards.append(0) # Penalize lack of code elsewhere
             continue
-        score = imports_decorator_scorer(triton_code)
+        with wandb_attributes():
+            score = imports_decorator_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["imports_decorator_ok"] if score["imports_decorator_ok"] else 0)
     return rewards
 
@@ -306,7 +326,8 @@ def constexpr_reward(completions, **kwargs):
         if not triton_code:
             rewards.append(0)
             continue
-        score = constexpr_scorer(triton_code)
+        with wandb_attributes():
+            score = constexpr_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["constexpr_ok"] if score["uses_constexpr"] else 0)
     return rewards
 
@@ -335,7 +356,8 @@ def valid_tl_methods_reward(completions, **kwargs):
         if not triton_code:
             rewards.append(0)
             continue
-        score = valid_tl_methods_scorer(triton_code)
+        with wandb_attributes():
+            score = valid_tl_methods_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["valid_tl_methods_ok"] if score["all_tl_methods_valid"] else 0)
     return rewards
 
@@ -371,7 +393,8 @@ def masks_load_store_reward(completions, **kwargs):
         if not triton_code:
             rewards.append(0)
             continue
-        score = masks_load_store_scorer(triton_code)
+        with wandb_attributes():
+            score = masks_load_store_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["masks_load_store_ok"] if score["uses_mask_load_store"] else 0)
     return rewards
 
@@ -392,7 +415,8 @@ def torch_empty_penalty(completions, **kwargs):
             continue
         # Check only within the kernel function definition if possible?
         # For now, check the whole extracted code blob.
-        score = torch_empty_scorer(triton_code)
+        with wandb_attributes():
+            score = torch_empty_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["torch_empty_penalty"] if score["uses_torch_empty"] else 0)
     return rewards
 
@@ -412,6 +436,7 @@ def torch_zeros_reward(completions, **kwargs):
             rewards.append(0)
             continue
         # Similar to torch.empty, ideally check only in entrypoint.
-        score = torch_zeros_scorer(triton_code)
+        with wandb_attributes():
+            score = torch_zeros_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["torch_zeros_ok"] if score["uses_torch_zeros"] else 0)
     return rewards
