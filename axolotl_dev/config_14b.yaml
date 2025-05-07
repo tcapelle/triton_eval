@@ -36,7 +36,7 @@ datasets:
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
-output_dir: /root/models/grpo-beta-zero-14b-v4
+output_dir: /root/models/grpo-beta-zero-14b-v5
 
 dataloader_prefetch_factor: 32
 dataloader_num_workers: 2
@@ -51,7 +51,7 @@ pad_to_sequence_len: false
 
 wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
-wandb_name: grpo-qwen14b-v4
+wandb_name: grpo-qwen14b-v5
 
 gradient_accumulation_steps: 3
 micro_batch_size: 8  # should match num_generations / num_gpus
@@ -76,3 +76,5 @@ warmup_steps: 100
 evals_per_epoch: 1
 saves_per_epoch: 1
 save_total_limit: 4
+
+gc_steps: 1
