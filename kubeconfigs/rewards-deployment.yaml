@@ -30,19 +30,36 @@ spec:
       # imagePullSecrets: ...
       containers:
       - name: axolotl-rewards-container
-        image: your-registry/your-axolotl-app:latest # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:latest # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["python"]
         args:
           - "server.py"
         resources:
           limits:
-            # README: CUDA_VISIBLE_DEVICES=4,5,6,7 python server.py (4 GPUs)
-            # Adjust if server.py does not actually require this many GPUs.
-            nvidia.com/gpu: 4
+            nvidia.com/gpu: "8"
+            cpu: "32"
+            memory: "1000Gi"
+          requests:
+            cpu: "32"
+            memory: "1000Gi"
+            nvidia.com/gpu: "8"
         ports:
         # README mentioned ssh -L 9347:localhost:9347 for rewards server
         - containerPort: 9347
           name: http-rewards
       # tolerations: ...
       # nodeSelector: ... 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: axolotl-rewards-service
+spec:
+  selector:
+    app: axolotl-rewards # Matches the labels of the pods in your Deployment
+  ports:
+    - protocol: TCP
+      port: 9347 # Port on which the service is exposed
+      targetPort: 9347 # Port on the pod to forward traffic to (containerPort)
+  type: ClusterIP 

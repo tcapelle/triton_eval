@@ -13,7 +13,10 @@ rl: grpo
 trl:
   beta: 0.0
   max_completion_length: 4096
+  num_generations: 12
   use_vllm: true
+  vllm_server_host: "axolotl-vllm-service"
+  vllm_server_port: 8000
   reward_funcs:
     - rewards.think_reward
     - rewards.one_code_blob_reward
@@ -25,9 +28,9 @@ trl:
     - rewards.torch_empty_penalty
     - rewards.torch_zeros_reward
   reward_weights:
-  vllm_gpu_memory_utilization: 0.9
-  # vllm_max_model_len: 4096 # May be useful for big models/small GPUs
-  num_generations: 12
+  vllm: # stuff used by the trainer to call the vllm server
+    vllm_gpu_memory_utilization: 0.9
+
 
 chat_template: qwen_25
 datasets:
