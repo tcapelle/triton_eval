@@ -1,0 +1,191 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: devpod-2
+  namespace: default
+  labels:
+    app: devpod-2
+spec:
+  serviceName: "devpod-2"
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devpod-2
+  template:
+    metadata:
+      labels:
+        parasail.io/deployment: parasail-devpod-2
+        parasail.io/owner: parasail
+        app: devpod-2
+    spec:
+      nodeSelector:
+        parasail-gpu-type: H200SXM
+      tolerations:
+      - key: sunk.coreweave.com/nodes
+        operator: Exists
+      containers:
+      - name: dind
+        image: docker:dind
+        securityContext:
+          privileged: true
+        args:
+        - "--host=tcp://0.0.0.0:2375"
+        - "--tls=false"
+        volumeMounts:
+        - name: docker-graph-storage
+          mountPath: /var/lib/docker
+        - name: devpod-storage
+          mountPath: /workspace
+          subPath: dind-workspace
+        env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+      - name: devpod
+        image: pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel
+        ### Run start with an infinite sleep loop
+        securityContext:
+          privileged: true
+        resources:
+          limits:
+            nvidia.com/gpu: "8"
+            cpu: "32"
+            memory: "1200Gi"
+          requests:
+            cpu: "32"
+            memory: "1200Gi"
+            nvidia.com/gpu: "8"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Install SSH server with non-interactive frontend to avoid debconf issues
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update && apt-get install -y openssh-server
+          
+          # Create required directories
+          mkdir -p /run/sshd
+          
+          # Configure SSH with secure settings
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+          sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          sed -i 's/#AuthorizedKeysFile/AuthorizedKeysFile/' /etc/ssh/sshd_config
+          echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config
+          echo "UsePAM no" >> /etc/ssh/sshd_config
+          
+          # Set up authorized keys
+          mkdir -p /root/.ssh
+          cp /etc/ssh-keys/authorized_keys /root/.ssh/authorized_keys
+          chmod 700 /root/.ssh
+          chmod 600 /root/.ssh/authorized_keys
+          
+          # Start SSH server directly (not using service)
+          echo "Starting SSH server..."
+          /usr/sbin/sshd -D -e &
+          SSHD_PID=$!
+          echo "SSH server started with PID: $SSHD_PID"
+          
+          # Keep container running
+          echo "Container startup complete, entering wait loop"
+          while true; do
+            sleep 3600
+            # Check if sshd is still running
+            if ! kill -0 $SSHD_PID 2>/dev/null; then
+              echo "SSH server stopped, restarting..."
+              /usr/sbin/sshd -D -e &
+              SSHD_PID=$!
+              echo "SSH server restarted with PID: $SSHD_PID"
+            fi
+          done
+        ports:
+        - containerPort: 2375
+          name: docker
+        - containerPort: 22
+          name: ssh
+        volumeMounts:
+        - name: shared-tools
+          mountPath: /shared
+        - name: devpod-storage
+          mountPath: /workspace
+        - name: ssh-keys
+          mountPath: /etc/ssh-keys
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        env:
+        - name: DOCKER_HOST
+          value: "tcp://localhost:2375"
+      volumes:
+      - name: shared-tools
+        emptyDir: {}
+      - name: ssh-keys
+        configMap:
+          name: devpod-2-ssh-keys
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 132Gi
+  volumeClaimTemplates:
+  - metadata:
+      name: docker-graph-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 200Gi
+  - metadata:
+      name: devpod-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 500Gi
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: devpod-2-ssh
+  namespace: default
+spec:
+  entryPoints:
+    - parasailssh
+  routes:
+    - match: HostSNI(`*`)
+      services:
+        - name: devpod-2
+          namespace: default
+          port: 22
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devpod-2-ssh-keys
+  namespace: default
+data:
+  authorized_keys: |
+    ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC1qbTIKmQHEFcjzpNbuYjMTAjYT23Tnr+K2UlOoF1xjYUzZTzTHhdm6YiLpB5QhGvd8A2NUWj+uGMN3kdhqrzSJC/J2fIRSi79i7zSPbRF5B/8OQ/uQJJF/mmCMda3Ys7xhYCzLcqqVMKTmipwP39+RHUPayR+nkmWGu7EnKDNzt7qmloFKrxQimIj+AGlOVaAl1gsAGXXYE3VZBQFs7OqgnnTTFI5dJuZNORY9ZMKEAvZROzBJ5ThivX1VD+pxFwXTnCMzBfvgzO/mXRAlHiNlGcla4wUtijb+UrXHSQF/DjBUkMjyinDQUHGM4VKaAy6aklX4AJqGPlcqZAh/+xpRfSr+fHtqmSG1BQkCXFrx791cLjGcoUrvjDFZv65/jSJpjXgtkiS7LkLPm3KUMn5gMhhmkyRr7RTFdoafFNNpTtnuzOsfIKQr7mMU5vOLDGBVJ4l9R7ZigcttfKgx5xCMaW/90cff3d31Y8jbPh2ZAkPHIu3r0L+Gicj+p2Ns9wy+QrZ5sXIvIQZK3L/3iPEaPkVzJ0mqd11YDIHnrnzKkN5CHmDrPzitA6AdMjtsjhxcrB/vaqyb/nmcEixro8k5BkcTi+ZuX7mVn8amysb4O/k9GdbbeT/JMYnKHyAaWQvvXMSywch4B6yBPxIfR827fqjKHLuSW4DlQ+tqD5dxQ== xiaoman@Xiaomans-MBP.MG8702
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMzYcNhRZOJK0k8935T9OuGiRYFmAGCELNeUBMFWescK tcapelle@M4Max.local
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBcD6GgW4mAt50jKgyv4xmnjNiRANl/iGo/GPsGAcTf+ zifei.tong@cloudex.io
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFlOG2+1T4mdRZ0swFuJoZmzu3pARSE0iMhdMywkhoiY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devpod-2
+  namespace: default
+  labels:
+    app: devpod-2
+spec: 
+  clusterIP: None
+  selector:
+    app: devpod-2
+    statefulset.kubernetes.io/pod-name: devpod-2-0
+  ports:
+  - port: 2375
+    name: docker
+    targetPort: 2375
+  - port: 22
+    name: ssh
+    targetPort: 22
