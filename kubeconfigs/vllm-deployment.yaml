@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axolotl-vllm-server
+  labels:
+    app: axolotl-vllm
+    task: serving # Task label for anti-affinity
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: axolotl-vllm
+  template:
+    metadata:
+      labels:
+        app: axolotl-vllm # Pods get this label
+        task: serving     # And this task label
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: task # Avoid pods with these task labels
+                operator: In
+                values:
+                - training
+                - rewards
+            topologyKey: "kubernetes.io/hostname" # Spread across different nodes
+      # Uncomment and configure if your image is in a private registry:
+      # imagePullSecrets:
+      # - name: my-registry-secret
+      containers:
+      - name: axolotl-vllm-container
+        image: your-registry/your-axolotl-app:latest # <-- UPDATE THIS
+        workingDir: /app/axolotl_dev
+        command: ["axolotl"]
+        args:
+          - "vllm-serve"
+          - "config_14b.yaml"
+          - "--tensor-parallel-size"
+          - "4" # Matches 4 GPUs
+        resources:
+          limits:
+            nvidia.com/gpu: 4 # Request 4 GPUs
+        # If vllm-serve listens on a port (e.g., 8000) and you need to expose it:
+        # ports:
+        # - containerPort: 8000
+        #   name: http-vllm
+      # Add tolerations if your GPU nodes have taints
+      # tolerations:
+      # - key: "nvidia.com/gpu"
+      #   operator: "Exists"
+      #   effect: "NoSchedule"
+      # Add nodeSelector if you need to target specific types of GPU nodes
+      # nodeSelector:
+      #   cloud.google.com/gke-accelerator: nvidia-tesla-t4 # Example for GKE 

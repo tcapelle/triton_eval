@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: axolotl-training-job # Consider generateName for multiple runs: axolotl-training-job-
+  labels:
+    app: axolotl-train
+    task: training # Task label for anti-affinity
+spec:
+  template:
+    metadata:
+      labels:
+        app: axolotl-train # Pods get this label
+        task: training     # And this task label
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: task # Avoid pods with these task labels
+                operator: In
+                values:
+                - serving
+                - rewards
+            topologyKey: "kubernetes.io/hostname"
+      # imagePullSecrets: ...
+      containers:
+      - name: axolotl-train-container
+        image: your-registry/your-axolotl-app:latest # <-- UPDATE THIS
+        workingDir: /app/axolotl_dev
+        command: ["axolotl"]
+        args:
+          - "train"
+          - "config_14b.yaml"
+          - "--deepspeed"
+          - "deepspeed_configs/zero2.json"
+        env:
+        - name: WANDB_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wandb-api-key-secret # Name of the secret you created
+              key: WANDB_API_KEY        # Key within the secret
+        # You can add other environment variables here if needed
+        # - name: ANOTHER_ENV_VAR
+        #   value: "some_value"
+        resources:
+          limits:
+            # README: CUDA_VISIBLE_DEVICES=4,5,6,7 for training (4 GPUs)
+            nvidia.com/gpu: 4
+      restartPolicy: OnFailure
+      # tolerations: ...
+      # nodeSelector: ...
+  backoffLimit: 0 # No retries for the job on failure 

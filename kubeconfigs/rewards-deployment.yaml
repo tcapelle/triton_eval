@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axolotl-rewards-server
+  labels:
+    app: axolotl-rewards
+    task: rewards # Task label for anti-affinity
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: axolotl-rewards
+  template:
+    metadata:
+      labels:
+        app: axolotl-rewards # Pods get this label
+        task: rewards        # And this task label
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: task # Avoid pods with these task labels
+                operator: In
+                values:
+                - serving
+                - training
+            topologyKey: "kubernetes.io/hostname"
+      # imagePullSecrets: ...
+      containers:
+      - name: axolotl-rewards-container
+        image: your-registry/your-axolotl-app:latest # <-- UPDATE THIS
+        workingDir: /app/axolotl_dev
+        command: ["python"]
+        args:
+          - "server.py"
+        resources:
+          limits:
+            # README: CUDA_VISIBLE_DEVICES=4,5,6,7 python server.py (4 GPUs)
+            # Adjust if server.py does not actually require this many GPUs.
+            nvidia.com/gpu: 4
+        ports:
+        # README mentioned ssh -L 9347:localhost:9347 for rewards server
+        - containerPort: 9347
+          name: http-rewards
+      # tolerations: ...
+      # nodeSelector: ... 
