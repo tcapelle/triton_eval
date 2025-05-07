@@ -1,15 +1,15 @@
 import weave
 
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
 from dataclasses import dataclass
 import simple_parsing as sp
-from rich.pretty import pprint
 
 @dataclass
 class Args:
     dataset_name: str = "tcapelle/train_ds_triton_v2f2"#"GPUMODE/Inductor_Created_Data_Permissive"
     prepared_dataset_name: str = "tcapelle/train_ds_triton"
     code_column: str = "pt_code_without_tests"
+    split: str = "train"
 
 
 SYSTEM_PROMPT = """
@@ -78,9 +78,13 @@ def get_dataset(dataset_name, code_column, split="train"):
 
 if __name__ == "__main__":
     args = sp.parse(Args)
-    dataset = get_dataset(args.dataset_name, args.code_column, split="train")
-    # dataset.save_to_disk("train_dataset")
-    dataset.push_to_hub(args.prepared_dataset_name, commit_message="push prepared")
+    dataset = get_dataset(args.dataset_name, args.code_column, split=args.split)
+    dataset_dict = DatasetDict({
+        "train": dataset,
+        "debug": dataset.select(range(24)),
+    })
+
+    dataset_dict.push_to_hub(args.prepared_dataset_name, commit_message="push prepared")
 
     weave.init("grpo-cuda/axolotl-grpo")
     wds = weave.Dataset(rows=dataset.to_list(), name="train_ds_triton")
