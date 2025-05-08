@@ -38,7 +38,11 @@ def uses_torch_in_kernel(src: str) -> bool:
     """
     Parse source, return True if any torch.* usage appears inside a @triton.jit kernel.
     """
-    tree = ast.parse(src)
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        # malformed code, treat as hacked
+        return True
     checker = TritonKernelSanityChecker()
     checker.visit(tree)
     return checker.bad_usage
@@ -78,7 +82,11 @@ def count_primitives(src: str) -> int:
     """
     Parse source, count distinct Triton primitives used inside @triton.jit kernels.
     """
-    tree = ast.parse(src)
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        # malformed code, no primitives found
+        return 0
     checker = TritonCoverageChecker()
     checker.visit(tree)
     return len(checker.primitives) 
