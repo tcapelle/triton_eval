@@ -13,6 +13,8 @@ import asyncio
 import torch.distributed as dist
 import logging
 from contextlib import nullcontext
+from tools import extract_code, run_python_code  # run_python_in_process no longer used
+from axolotl_dev.kernel_checks import uses_torch_in_kernel, count_primitives
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -25,12 +27,6 @@ except:
     weave.init("grpo-cuda/axolotl-grpo")
 
 RUN_ON_SERVER = True  # When True, execute Triton code via the /run_code API instead of locally
-
-from tools import extract_code, run_python_code  # run_python_in_process no longer used
-
-# ---------------------------------------------------------------------------
-# Remote execution helper
-# ---------------------------------------------------------------------------
 
 SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
 RUN_CODE_ENDPOINT = f"{SERVER_URL}/run_code"
@@ -83,8 +79,8 @@ REWARD_MAGNITUDES = {
     "one_code_blob_ok": 0.1,
     "one_code_blob_not_ok": -0.1,
     "code_runs_fail": -0.2,
-    "code_runs_mismatch": 0.0,
-    "code_runs_match": 1.0,
+    "code_runs_incorrect": 0.0,
+    "code_runs_correct": 1.0,
     "imports_decorator_ok": 0.1,
     "constexpr_ok": 0.1,
     "valid_tl_methods_ok": 0.1,
@@ -139,7 +135,7 @@ VALID_TL_METHODS = set(tl_methods)
 # ===== Reward Functions =====
 @weave.op
 def think_scorer(output):
-    "Check if the output has exactly one <think> block with content >= 10 chars"
+    "Check if the output has exactly one <think> block with content >= 100 chars"
     thinking_content = re.findall(r"<think>(.*?)</think>", output, re.DOTALL)
 
     num_matches = len(thinking_content)
@@ -149,7 +145,7 @@ def think_scorer(output):
     if num_matches == 1:
         content_length = len(thinking_content[0].strip())
         thinking_length = content_length
-        if content_length >= 10:
+        if content_length >= 100:
             thinking_ok = True
 
     return {"thinking_ok": thinking_ok, "thinking_length": thinking_length}
@@ -205,6 +201,16 @@ def one_code_blob_reward(completions, **kwargs):
     return rewards
 
 @weave.op
+def is_code_hacking(triton_code: str) -> dict:
+    """
+    Static analysis: detect torch.* inside Triton kernels and count primitives.
+    Returns dict with keys 'hacked' and 'primitive_count'.
+    """
+    hacked = uses_torch_in_kernel(triton_code)
+    primitive_count = count_primitives(triton_code)
+    return {"hacked": hacked, "primitive_count": primitive_count}
+
+@weave.op
 async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
     "Runs the code and returns the output"
     assert isinstance(tests, str), f"tests is not a string: {tests}"
@@ -215,8 +221,16 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
     }
 
     triton_code = extract_code(output)
+    # static hack & coverage analysis
+    analysis = is_code_hacking(triton_code)
+    if analysis["hacked"]:
+        # hacked kernels short-circuit
+        return {"triton_runs": False, "correct": False,
+                "hacked": True, "primitive_count": analysis["primitive_count"]}
+    # too-short output => no kernel
     if len(triton_code) < 10:
-        return {"triton_runs": False, "correct": False}
+        return {"triton_runs": False, "correct": False,
+                "primitive_count": analysis["primitive_count"]}
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     if RUN_ON_SERVER:
@@ -226,7 +240,8 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
         try:
             triton_output = run_python_code(triton_and_test, env)
         except subprocess.TimeoutExpired:
-            return {"triton_runs": False, "correct": False}
+            return {"triton_runs": False, "correct": False,
+                    "primitive_count": analysis["primitive_count"]}
 
     runs = triton_output["status_code"] == 0
     correct = pytorch_code_output == triton_output["stdout"] and runs
@@ -236,9 +251,9 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
         "correct": correct
         }
     
-    # the full payload for debugging and weave capture
-    if RUN_ON_SERVER:
-        triton_output.update(result)
+    # attach dynamic result and coverage
+    triton_output.update(result)
+    triton_output["primitive_count"] = analysis["primitive_count"]
     return triton_output
 
 def _compute_code_runs_reward(run_output):
@@ -248,34 +263,28 @@ def _compute_code_runs_reward(run_output):
     if not triton_runs:
         return REWARD_MAGNITUDES["code_runs_fail"]
     elif not correct:
-        return REWARD_MAGNITUDES["code_runs_mismatch"]
+        return REWARD_MAGNITUDES["code_runs_incorrect"]
     else:
-        return REWARD_MAGNITUDES["code_runs_match"]
+        return REWARD_MAGNITUDES["code_runs_correct"]
 
 @weave.op
 def reward_code_runs(completions, tests, stdout, **kwargs):
-    """Synchronous wrapper around the async implementation.
-
-    We build coroutines for all completions, execute them concurrently with
-    `asyncio.gather`, and then return the computed rewards.
-    """
+    """Synchronous wrapper around the async implementation."""
     
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
-        tasks = [run_scorer_async(resp, test, pt_std) for resp, test, pt_std in zip(responses, tests, stdout)]
+        # delegate to hack-gated dynamic run
+        tasks = [run_scorer_async(resp, test, pt_std)
+                 for resp, test, pt_std in zip(responses, tests, stdout)]
         with wandb_attributes():
             run_scores = await asyncio.gather(*tasks)
         return [_compute_code_runs_reward(score) for score in run_scores]
 
     try:
-        # If there's already a running loop (unlikely in most sync contexts),
-        # we schedule the coroutine in that loop and block until done.
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop – safe to create one.
         return asyncio.run(_compute_async())
     else:
-        # Running loop exists; run the coroutine and wait.
         return loop.run_until_complete(_compute_async())
 
 # ===== Static Code Analysis Rewards =====
