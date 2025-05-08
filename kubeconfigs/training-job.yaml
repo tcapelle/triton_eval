@@ -48,6 +48,8 @@ spec:
             secretKeyRef:
               name: wandb-api-key-secret # Name of the secret you created
               key: WANDB_API_KEY        # Key within the secret
+        - name: WEAVE_PRINT_CALL_LINK
+          value: "0"
         - name: TRITON_SERVER_URL
           value: "http://axolotl-rewards-service:9347"
         - name: HF_TOKEN
