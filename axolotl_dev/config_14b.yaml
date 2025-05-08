@@ -12,8 +12,8 @@ strict: false
 rl: grpo
 trl:
   beta: 0.0
-  max_completion_length: 4096
-  num_generations: 12
+  max_completion_length: 8192
+  num_generations: 16
   use_vllm: true
   vllm_server_host: "axolotl-vllm-service"
   vllm_server_port: 8000
@@ -47,7 +47,7 @@ dataloader_pin_memory: true
 
 gc_steps: 1
 
-sequence_len: 4096
+sequence_len: 8192
 sample_packing: false
 eval_sample_packing: false
 pad_to_sequence_len: false
@@ -64,7 +64,7 @@ num_epochs: 3
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
 learning_rate: 1.0e-6
-max_grad_norm: 1.0
+max_grad_norm: 0.5
 weight_decay: 0.01
 
 bf16: true
@@ -79,6 +79,7 @@ logging_steps: 1
 warmup_steps: 100
 evals_per_epoch: 1
 saves_per_epoch: 1
-save_total_limit: 4
+save_total_limit: 2
+save_only_model: true
 
 gc_steps: 1
