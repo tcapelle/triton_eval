@@ -30,11 +30,16 @@ spec:
       # imagePullSecrets: ...
       containers:
       - name: axolotl-rewards-container
-        image: ghcr.io/tcapelle/triton_eval:latest # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:weave # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["python"]
         args:
           - "server.py"
+        env:
+          - name: TASK_TIMEOUT_SECONDS
+            value: "240"
+          - name: WORKER_JOIN_TIMEOUT
+            value: "20"
         resources:
           limits:
             nvidia.com/gpu: "8"
