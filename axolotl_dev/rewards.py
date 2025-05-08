@@ -14,7 +14,7 @@ import torch.distributed as dist
 import logging
 from contextlib import nullcontext
 from tools import extract_code, run_python_code  # run_python_in_process no longer used
-from axolotl_dev.kernel_checks import uses_torch_in_kernel, count_primitives
+from kernel_checks import uses_torch_in_kernel, count_primitives
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
