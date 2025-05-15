@@ -8,6 +8,7 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
     def __init__(self):
         self.inside_kernel = False
         self.bad_usage = False
+        self.call_called = False
 
     def visit_FunctionDef(self, node):
         is_kernel = any(
@@ -21,6 +22,8 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
             self.inside_kernel = True
             self.generic_visit(node)
             self.inside_kernel = False
+        else:
+            self.generic_visit(node)
 
     def visit_Attribute(self, node):
         if self.inside_kernel and isinstance(node.value, ast.Name) and node.value.id == "torch":
@@ -31,6 +34,8 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
         if self.inside_kernel and isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name) and node.func.value.id == "torch":
                 self.bad_usage = True
+        elif not self.inside_kernel and isinstance(node.func, ast.Call) and node.func.id == "call":
+            self.call_called = True
         self.generic_visit(node)
 
 @weave.op
@@ -45,7 +50,7 @@ def uses_torch_in_kernel(src: str) -> bool:
         return True
     checker = TritonKernelSanityChecker()
     checker.visit(tree)
-    return checker.bad_usage
+    return checker.bad_usage or not checker.call_called
 
 class TritonCoverageChecker(ast.NodeVisitor):
     """
