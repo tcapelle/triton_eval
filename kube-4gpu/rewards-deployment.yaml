@@ -42,13 +42,13 @@ spec:
             value: "20"
         resources:
           limits:
-            nvidia.com/gpu: "8"
-            cpu: "32"
-            memory: "1000Gi"
+            nvidia.com/gpu: "4"
+            cpu: "16"
+            memory: "800Gi"
           requests:
-            cpu: "32"
-            memory: "1000Gi"
-            nvidia.com/gpu: "8"
+            cpu: "16"
+            memory: "800Gi"
+            nvidia.com/gpu: "4"
         ports:
         # README mentioned ssh -L 9347:localhost:9347 for rewards server
         - containerPort: 9347

@@ -63,13 +63,13 @@ spec:
             name: model-checkpoints
         resources:
           limits:
-            nvidia.com/gpu: "8"
-            cpu: "32"
-            memory: "1600Gi"
+            nvidia.com/gpu: "4"
+            cpu: "16"
+            memory: "800Gi"
           requests:
-            cpu: "32"
-            memory: "1600Gi"
-            nvidia.com/gpu: "8"
+            cpu: "16"
+            memory: "800Gi"
+            nvidia.com/gpu: "4"
       volumes:
         - name: model-checkpoints
           persistentVolumeClaim:
@@ -77,7 +77,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 1600Gi # Adjust size as needed
+            sizeLimit: 130Gi # Adjust size as needed
         - name: config-volume
           configMap:
             name: axolotl-config

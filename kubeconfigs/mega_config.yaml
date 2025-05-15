@@ -40,12 +40,12 @@ spec:
       # - name: my-registry-secret
       containers:
       - name: axolotl-vllm-container
-        image: ghcr.io/tcapelle/triton_eval:hack # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:9.1 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["axolotl"]
         args:
           - "vllm-serve"
-          - "/mnt/axolotl-config/config_14b.yaml"
+          - "/mnt/axolotl-config/config_32b.yaml"
           - "--tensor-parallel-size"
           - "8" # Matches 8 GPUs
         resources:
@@ -68,14 +68,6 @@ spec:
           name: http-vllm
         - containerPort: 51216
           name: weight-updates
-      # Add tolerations if your GPU nodes have taints
-      # tolerations:
-      # - key: "nvidia.com/gpu"
-      #   operator: "Exists"
-      #   effect: "NoSchedule"
-      # Add nodeSelector if you need to target specific types of GPU nodes
-      # nodeSelector:
-      #   cloud.google.com/gke-accelerator: nvidia-tesla-t4 # Example for GKE 
 ---
 apiVersion: v1
 kind: Service
@@ -128,7 +120,7 @@ spec:
       # imagePullSecrets: ...
       containers:
       - name: axolotl-rewards-container
-        image: ghcr.io/tcapelle/triton_eval:hack # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:9.1 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["python"]
         args:
@@ -203,12 +195,12 @@ spec:
       # imagePullSecrets: ...
       containers:
       - name: axolotl-train-container
-        image: ghcr.io/tcapelle/triton_eval:hack # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:9.1 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["axolotl"]
         args:
           - "train"
-          - "/mnt/axolotl-config/config_14b.yaml"
+          - "/mnt/axolotl-config/config_32b.yaml"
           - "--deepspeed"
           - "deepspeed_configs/zero2.json"
         env:

@@ -1,0 +1,50 @@
+base_model: Qwen/Qwen3-14B
+
+plugins:
+  - axolotl.integrations.liger.LigerPlugin
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin
+liger_rope: true
+liger_rms_norm: true
+liger_glu_activation: true
+
+chat_template: qwen3
+datasets:
+  - path: axolotl-ai-internal/gpumode-py2triton-reasoning-v2
+    type: chat_template
+    split: train
+
+dataset_prepared_path: last_run_prepared
+val_set_size: 0.005
+output_dir: /model-checkpoints/sft-qwen3-14b
+
+sequence_len: 16384
+sample_packing: true
+pad_to_sequence_len: true
+
+wandb_project: axolotl-grpo
+wandb_entity: grpo-cuda
+wandb_name: sft-qwen3-14b
+wandb_log_model: checkpoint
+
+gradient_accumulation_steps: 2
+micro_batch_size: 4
+num_epochs: 3
+optimizer: adamw_torch_fused
+max_grad_norm: 0.1
+neftune_noise_alpha: 10
+lr_scheduler: cosine
+learning_rate: 1e-6
+bf16: true
+tf32: true
+
+gradient_checkpointing: offload
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+logging_steps: 1
+flash_attention: true
+
+warmup_steps: 100
+evals_per_epoch: 5
+saves_per_epoch: 1
+weight_decay: 0.01
+deepspeed: deepspeed_configs/zero1.json

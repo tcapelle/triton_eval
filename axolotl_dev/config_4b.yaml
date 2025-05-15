@@ -1,6 +1,4 @@
-# base_model: Qwen/Qwen2.5-Coder-14B-Instruct
-base_model: winglian/qwen3-14b-triton-v1
-
+base_model: Qwen/Qwen3-4B
 # base_model: /workspace/data/axolotl-artifacts/grpo-beta-zero
 # Automatically upload checkpoint and final model to HF
 # hub_model_id: username/custom_model_name
@@ -37,11 +35,11 @@ trl:
 chat_template: qwen3
 datasets:
   - path: tcapelle/train_ds_triton
-    split: train
+    split: debug
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
-output_dir: /model-checkpoints/grpo-qwen3-14b
+output_dir: /model-checkpoints/grpo-qwen3-4b
 
 dataloader_prefetch_factor: 32
 dataloader_num_workers: 2
@@ -56,12 +54,12 @@ pad_to_sequence_len: false
 
 wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
-wandb_name: grpo-qwen3-14b
+wandb_name: grpo-qwen3-4b
 wandb_log_model: checkpoint
 
 gradient_accumulation_steps: 3
 micro_batch_size: 8  # should match num_generations / num_gpus
-num_epochs: 3
+num_epochs: 1
 
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
