@@ -201,16 +201,16 @@ def one_code_blob_reward(completions, **kwargs):
     return rewards
 
 @weave.op
-def is_code_hacking(triton_code: str) -> dict:
+def is_code_hacking(triton_code: str, entrypoint: str) -> dict:
     """
     Static analysis: detect torch.* inside Triton kernels and count primitives.
     Returns dict with keys 'hacked' and 'primitive_count'.
     """
-    hacked = uses_torch_in_kernel(triton_code)
+    hacked = uses_torch_in_kernel(triton_code, entrypoint)
     return {"hacked": hacked}
 
 @weave.op
-async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
+async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, entrypoint: str):
     "Runs the code and returns the output"
     assert isinstance(tests, str), f"tests is not a string: {tests}"
     # run pt code
@@ -221,7 +221,7 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
 
     triton_code = extract_code(output)
     # static hack & coverage analysis
-    analysis = is_code_hacking(triton_code)
+    analysis = is_code_hacking(triton_code, entrypoint)
     if analysis["hacked"]:
         # hacked kernels short-circuit
         return {"triton_runs": False, "correct": False,
@@ -267,13 +267,13 @@ def _compute_code_runs_reward(run_output):
         return REWARD_MAGNITUDES["code_runs_correct"]
 
 @weave.op
-def reward_code_runs(completions, tests, stdout, **kwargs):
+def reward_code_runs(completions, tests, stdout, entrypoint, **kwargs):
     """Synchronous wrapper around the async implementation."""
     
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
         # delegate to hack-gated dynamic run
-        tasks = [run_scorer_async(resp, test, pt_std)
+        tasks = [run_scorer_async(resp, test, pt_std, entrypoint)
                  for resp, test, pt_std in zip(responses, tests, stdout)]
         with wandb_attributes():
             run_scores = await asyncio.gather(*tasks)
