@@ -269,8 +269,8 @@ def reward_code_runs(completions, tests, stdout, entrypoint, **kwargs):
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
         # delegate to hack-gated dynamic run
-        tasks = [run_scorer_async(resp, test, pt_std, entrypoint)
-                 for resp, test, pt_std in zip(responses, tests, stdout)]
+        tasks = [run_scorer_async(resp, test, pt_std, entrypt)
+                 for resp, test, pt_std, entrypt in zip(responses, tests, stdout, entrypoint)]
         with wandb_attributes():
             run_scores = await asyncio.gather(*tasks)
         return [_compute_code_runs_reward(score) for score in run_scores]
