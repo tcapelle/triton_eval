@@ -23,6 +23,13 @@ spec:
                 - serving
                 - rewards
             topologyKey: "kubernetes.io/hostname"
+      initContainers:
+      - name: wait-for-vllm
+        image: busybox:1.28 # Or any small image with nc/curl
+        command: ['sh', '-c', 'until nc -zv axolotl-vllm-service 8000; do echo "Waiting for VLLM service..."; sleep 5; done']
+      - name: wait-for-rewards
+        image: busybox:1.28 # Or any small image with nc/curl
+        command: ['sh', '-c', 'until nc -zv axolotl-rewards-service 9347; do echo "Waiting for rewards service..."; sleep 5; done']
       # imagePullSecrets: ...
       containers:
       - name: axolotl-train-container
