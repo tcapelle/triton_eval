@@ -14,7 +14,7 @@ import torch.distributed as dist
 import logging
 from contextlib import nullcontext
 from tools import extract_code, run_python_code  # run_python_in_process no longer used
-from kernel_checks import uses_torch_in_kernel, count_primitives
+from kernel_checks import uses_torch_in_kernel
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -207,8 +207,7 @@ def is_code_hacking(triton_code: str) -> dict:
     Returns dict with keys 'hacked' and 'primitive_count'.
     """
     hacked = uses_torch_in_kernel(triton_code)
-    primitive_count = count_primitives(triton_code)
-    return {"hacked": hacked, "primitive_count": primitive_count}
+    return {"hacked": hacked}
 
 @weave.op
 async def run_scorer_async(output: str, tests: str, pytorch_code_output: str):
