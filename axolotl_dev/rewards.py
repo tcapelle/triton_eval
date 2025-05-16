@@ -204,7 +204,7 @@ def one_code_blob_reward(completions, **kwargs):
 def is_code_hacking(triton_code: str, entrypoint: str) -> dict:
     """
     Static analysis: detect torch.* inside Triton kernels and count primitives.
-    Returns dict with keys 'hacked' and 'primitive_count'.
+    Returns dict with keys 'hacked'.
     """
     hacked = uses_torch_in_kernel(triton_code, entrypoint)
     return {"hacked": hacked}
@@ -224,12 +224,10 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
     analysis = is_code_hacking(triton_code, entrypoint)
     if analysis["hacked"]:
         # hacked kernels short-circuit
-        return {"triton_runs": False, "correct": False,
-                "hacked": True, "primitive_count": analysis["primitive_count"]}
+        return {"triton_runs": False, "correct": False,"hacked": True}
     # too-short output => no kernel
     if len(triton_code) < 10:
-        return {"triton_runs": False, "correct": False,
-                "primitive_count": analysis["primitive_count"]}
+        return {"triton_runs": False, "correct": False}
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     if RUN_ON_SERVER:
@@ -239,8 +237,7 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
         try:
             triton_output = run_python_code(triton_and_test, env)
         except subprocess.TimeoutExpired:
-            return {"triton_runs": False, "correct": False,
-                    "primitive_count": analysis["primitive_count"]}
+            return {"triton_runs": False, "correct": False}
 
     runs = triton_output["status_code"] == 0
     correct = pytorch_code_output == triton_output["stdout"] and runs
@@ -252,7 +249,6 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
     
     # attach dynamic result and coverage
     triton_output.update(result)
-    triton_output["primitive_count"] = analysis["primitive_count"]
     return triton_output
 
 def _compute_code_runs_reward(run_output):
