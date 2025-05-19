@@ -14,33 +14,52 @@ class Args:
 
 SYSTEM_PROMPT = """
 You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters. 
+"""
+
+USER_PROMPT = """Convert the following PyTorch code to a Triton kernel.
+
+Pytorch code:
+```python
+{pytorch_code}```
 
 # Instructions
 - Ensure that the wrapper function fully corresponds to the provided function information.
 - Generate a detailed plan on how to convert and optimize the Pytorch code to a Triton kernel before writing the code.
 - The reasoning process MUST BE enclosed within <think> and </think> tags."
-- Reply with the thinking process and a single blob of code surrounded with ```python and ```.
-"""
+- Import torch, triton, and triton.language as tl and other necessary modules
+- Use @triton.jit decorator on the kernel implementation (not the entrypoint function)
+- Have proper grid and block sizes
+- Use a mask in the load/store operations
+- Use typed constants (tl.constexpr)
+- Handle tensor dimensions correctly
+- Return output matching PyTorch's implementation
+- Return with the thinking process and a single blob of code surrounded with ```python and ```.
 
-USER_PROMPT = """Convert the following PyTorch code to a Triton kernel.
-Pytorch code:
-```python
-{pytorch_code}```
+The entrypoint function must be named: {entrypoint}
+The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
 
-The function should have the same name as the PyTorch function: {entrypoint}
+No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
 
-Don't forget to format your answer as:
+# Output format
 <think>
 thinking process
 </think>
 
 ```python
 import torch
+import triton
+import triton.language as tl
 
 # relevant imports
 from typing import ...
 
+def {entrypoint}_kernel(
+    "The triton kernel implementation"
+):
+    ...
+
 def {entrypoint}(...):
+    "The entrypoint function that calls the triton kernel"
     ...
 ```"""
 
