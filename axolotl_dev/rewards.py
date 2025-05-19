@@ -2,6 +2,7 @@ import yaml
 import random  
 import weave
 import wandb
+import time
 import math
 import subprocess
 import tempfile
@@ -66,8 +67,19 @@ async def _run_code_on_server(code: str, tests: str) -> dict:
             # Network or other unexpected error
             return {"stdout": "", "stderr": str(e), "status_code": -1}
 
-# generated deadlocks with tokenizers
-# weave.init("grpo-cuda/axolotl-grpo")
+def reset_rewards_server(**kwargs):
+    "Reset the rewards server"
+    try:
+        if dist.is_initialized() and dist.get_rank() == 0:
+            if RUN_ON_SERVER:
+                with httpx.Client() as client:
+                    client.post(f"{SERVER_URL}/reset_workers")
+        else:
+            # we make sure the server is up before sending requests
+            time.sleep(5)
+    except Exception as e:
+        print(f"Error resetting rewards server: {e}")
+
 
 AVAILABLE_GPUS = list(range(torch.cuda.device_count()))
 
