@@ -68,7 +68,7 @@ async def _run_code_on_server(code: str, tests: str) -> dict:
             return {"stdout": "", "stderr": str(e), "status_code": -1}
 
 def reset_rewards_server(completions, **kwargs):
-    "Reset the rewards server"
+    "Reset the rewards server, this is a no-op"
     try:
         if dist.is_initialized() and dist.get_rank() == 0:
             if RUN_ON_SERVER:
@@ -77,8 +77,10 @@ def reset_rewards_server(completions, **kwargs):
         else:
             # we make sure the server is up before sending requests
             time.sleep(5)
+        return [None for _ in completions]
     except Exception as e:
         print(f"Error resetting rewards server: {e}")
+        return [None for _ in completions]
 
 
 AVAILABLE_GPUS = list(range(torch.cuda.device_count()))
