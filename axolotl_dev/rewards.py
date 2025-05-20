@@ -67,7 +67,7 @@ async def _run_code_on_server(code: str, tests: str) -> dict:
             # Network or other unexpected error
             return {"stdout": "", "stderr": str(e), "status_code": -1}
 
-def reset_rewards_server(**kwargs):
+def reset_rewards_server(completions, **kwargs):
     "Reset the rewards server"
     try:
         if dist.is_initialized() and dist.get_rank() == 0:
