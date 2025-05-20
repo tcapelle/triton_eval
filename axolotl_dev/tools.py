@@ -19,7 +19,7 @@ TEMP_FILES_DIR.mkdir(exist_ok=True)
 @weave.op
 def extract_code(code: str) -> str:
     "Extract the last code block surrounded by ```python, use re"
-    pattern = r"```python(.*?)```"
+    pattern = r"<triton>(.*?)</triton>"
     matches = re.findall(pattern, code, re.DOTALL)
     if matches:
         return matches[-1].strip()

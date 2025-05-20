@@ -184,7 +184,7 @@ def one_code_blob(output):
     # Remove the think block first
     output_without_think = output.split("</think>")[-1].strip()
 
-    code_blobs = re.findall(r"```python(.*?)```", output_without_think, re.DOTALL)
+    code_blobs = re.findall(r"<triton>(.*?)</triton>", output_without_think, re.DOTALL)
 
     num_matches = len(code_blobs)
     one_code_blob_ok = False
