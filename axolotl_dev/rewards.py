@@ -15,7 +15,7 @@ import torch.distributed as dist
 import logging
 from contextlib import nullcontext
 from tools import extract_code, run_python_code  # run_python_in_process no longer used
-from kernel_checks import uses_torch_in_kernel
+from kernel_checks import is_valid_kernel
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -214,14 +214,6 @@ def one_code_blob_reward(completions, **kwargs):
         rewards.append(reward)
     return rewards
 
-@weave.op
-def is_code_hacking(triton_code: str, entrypoint: str) -> dict:
-    """
-    Static analysis: detect torch.* inside Triton kernels and count primitives.
-    Returns dict with keys 'hacked'.
-    """
-    hacked = uses_torch_in_kernel(triton_code, entrypoint)
-    return {"hacked": hacked}
 
 @weave.op
 async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, entrypoint: str):
@@ -235,30 +227,38 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
 
     triton_code = extract_code(output)
     # static hack & coverage analysis
-    analysis = is_code_hacking(triton_code, entrypoint)
-    if analysis["hacked"]:
+    analysis = is_valid_kernel(triton_code, entrypoint)
+    if not analysis["is_valid"]:
         # hacked kernels short-circuit
-        return {"triton_runs": False, "correct": False,"hacked": True}
+        return {"triton_runs": False, "correct": False, "is_valid": False, "reason": analysis["reason"]}
+    
     # too-short output => no kernel
     if len(triton_code) < 10:
-        return {"triton_runs": False, "correct": False}
-    triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
+        return {"triton_runs": False, "correct": False, "is_valid": False, "reason": "Triton code too short."}
+    
+
 
     if RUN_ON_SERVER:
         triton_output = await _run_code_on_server(triton_code, tests)
     else:
         # Fallback to local execution (kept for completeness)
+        triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
         try:
             triton_output = run_python_code(triton_and_test, env)
         except subprocess.TimeoutExpired:
             return {"triton_runs": False, "correct": False}
 
+    # check correctness
     runs = triton_output["status_code"] == 0
+
+    # simple stdout string match
     correct = pytorch_code_output == triton_output["stdout"] and runs
 
     result = {
         "triton_runs": runs,
-        "correct": correct
+        "correct": correct,
+        "is_valid": True, # If we reached here, it means it wasn't initially flagged as hacked by static analysis
+        "reason": "" # No hack reason if not hacked
         }
     
     # attach dynamic result and coverage
