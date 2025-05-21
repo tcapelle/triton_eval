@@ -12,19 +12,50 @@ import traceback
 import importlib.util
 import tempfile
 import sys
+import textwrap
 
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
 
 @weave.op
-def extract_code(code: str) -> str:
-    "Extract the last code block surrounded by ```python, use re"
-    pattern = r"<triton>(.*?)</triton>"
-    matches = re.findall(pattern, code, re.DOTALL)
-    if matches:
-        return matches[-1].strip()
+def extract_code(text: str) -> str:
+    """
+    1) Extract the 'scope' from <triton> tags (closed or unclosed at start)
+    2) In that scope, find ALL ```...``` blocks (with optional language)
+    3) Return the content of the last block, dedented and stripped
+    4) If no blocks and we had a triton-scope, return that scope stripped
+    5) Else return empty string
+    """
+    # 1) pick your search scope and possible fallback
+    closed = re.findall(r"<triton>(.*?)</triton>", text, re.DOTALL)
+    if closed:
+        scope = closed[-1]
+        fallback = scope
+    elif text.startswith("<triton>") and "</triton>" not in text:
+        scope = text[len("<triton>"):]
+        fallback = scope
     else:
-        return ""
+        scope = text
+        fallback = None
+
+    # 2) unified regex for fenced blocks (captures an optional language)
+    pattern = re.compile(
+        r"```(?:([^\n`]+)[ \t]*\n)?(.*?)(?:\n)?```",
+        re.DOTALL
+    )
+    matches = list(pattern.finditer(scope))
+
+    # 3) if we found any fenced blocks, take the last one
+    if matches:
+        body = matches[-1].group(2)
+        return textwrap.dedent(body).strip()
+
+    # 4) no blocks → if this was a triton-scope, return it
+    if fallback is not None:
+        return fallback.strip()
+
+    # 5) nothing matched
+    return ""
 
 @weave.op
 def remove_tests(code: str) -> str:
