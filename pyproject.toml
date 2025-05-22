@@ -12,6 +12,7 @@ dependencies = [
     "weave>=0.51.47",
     "datasets>=3.6.0",
     "simple-parsing>=0.1.7",
+    "tiktoken>=0.9.0",
 ]
 
 [project.optional-dependencies]
