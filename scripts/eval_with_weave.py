@@ -208,15 +208,17 @@ def run_scorer(output, tests, stdout, runs, entrypoint):
         triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
         triton_runs = triton_output["status_code"] == 0
         triton_stdout = triton_output["stdout"]
+        triton_stderr = triton_output["stderr"]
         match = (stdout == triton_stdout and runs and triton_runs)
     else:
         match = False
         triton_runs = False
         triton_stdout = ""
-
+        triton_stderr = ""
     result = {
         "triton_runs": triton_runs,
         "triton_stdout": triton_stdout,
+        "triton_stderr": triton_stderr,
         "pt_runs": runs,
         "match": match,
         "analysis": analysis
