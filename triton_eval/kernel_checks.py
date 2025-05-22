@@ -43,6 +43,7 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
         # Traversal state
         self.current_function = None
         self.inside_kernel = False
+        self.function_calls = {}  # Maps function name -> set of functions it calls
 
     def _is_triton_jit(self, deco):
         # Handles @triton.jit and @triton.jit(...)
@@ -129,6 +130,8 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
         prev_func = self.current_function
         prev_inside = self.inside_kernel
         self.current_function = node.name
+        self.function_calls[node.name] = set()  # Initialize empty set of called functions
+        
         # Detect and flag empty Triton kernels
         if node.name in self.triton_kernel_defs:
             # consider only non-pass, non-docstring statements as effective
@@ -144,6 +147,15 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
 
     def visit_Call(self, node):
         name, kind = self._get_call_info(node)
+        
+        # Record this function call in our call graph
+        if name and self.current_function:
+            self.function_calls.setdefault(self.current_function, set()).add(name)
+        # Handle direct function name references that may not be detected by _get_call_info
+        elif isinstance(node.func, ast.Name) and self.current_function:
+            func_name = node.func.id
+            self.function_calls.setdefault(self.current_function, set()).add(func_name)
+            
         if self.inside_kernel and kind == 'torch':
             self.bad_torch_usage_in_kernel = True
         if self.current_function == self.entrypoint_name and not self.entrypoint_is_kernel:
@@ -152,6 +164,25 @@ class TritonKernelSanityChecker(ast.NodeVisitor):
             if kind == 'kernel':
                 self.entrypoint_calls_triton_kernel = True
         self.generic_visit(node)
+
+    def _calls_kernel_indirectly(self, func_name, visited=None):
+        """Recursively check if a function calls a Triton kernel through other functions."""
+        if visited is None:
+            visited = set()
+            
+        if func_name in visited:
+            return False  # Avoid cycles
+            
+        visited.add(func_name)
+        
+        # Direct calls to kernels
+        calls = self.function_calls.get(func_name, set())
+        if any(callee in self.triton_kernel_defs for callee in calls):
+            return True
+            
+        # Indirect calls through other functions
+        return any(self._calls_kernel_indirectly(callee, visited) for callee in calls 
+                  if callee in self.function_calls)
 
 @weave.op
 def is_valid_kernel(src: str, entrypoint: str) -> dict:
@@ -167,8 +198,8 @@ def is_valid_kernel(src: str, entrypoint: str) -> dict:
     try:
         tree = ast.parse(src)
     except SyntaxError as e:
-        # Malformed code
-        return {'is_valid': False, 'reason': f'Syntax error parsing source code:\n{e}'}
+        # Malformed code - return generic message without details
+        return {'is_valid': False, 'reason': 'Syntax error parsing source code.'}
 
     checker = TritonKernelSanityChecker(entrypoint_name=entrypoint)
     checker.visit(tree)
@@ -186,13 +217,16 @@ def is_valid_kernel(src: str, entrypoint: str) -> dict:
 
     # --- At this point, the entrypoint is a wrapper function ---
 
-    # Rule 3a: Wrapper has no Triton kernels defined in the source to call.
+    # Rule 3a: Source needs to define Triton kernels to call
     if not checker.triton_kernel_defs:
         return {'is_valid': False, 'reason': 'Entrypoint is a wrapper function, but no Triton kernels are defined in the source.'}
 
-    # Rule 3b: Wrapper doesn't call any of the defined Triton kernels.
-    if not checker.entrypoint_calls_triton_kernel:
-        return {'is_valid': False, 'reason': 'Entrypoint is a wrapper function, but it does not call any defined Triton kernel.'}
+    # Rule 3b: Wrapper must either directly call a kernel or call other functions that eventually call a kernel
+    calls_kernel_directly = checker.entrypoint_calls_triton_kernel
+    calls_kernel_indirectly = checker._calls_kernel_indirectly(entrypoint)
+    
+    if not (calls_kernel_directly or calls_kernel_indirectly):
+        return {'is_valid': False, 'reason': 'Entrypoint is a wrapper function, but it does not call any defined Triton kernel directly or indirectly.'}
 
     # --- At this point, entrypoint is a wrapper AND it calls a defined Triton kernel ---
 

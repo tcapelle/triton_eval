@@ -11,5 +11,8 @@ dependencies = [
     "uvicorn>=0.34.2",
 ]
 
+[project.optional-dependencies]
+eval = ["torch>=2.6"]
+
 [tool.setuptools]
 packages = ["triton_eval"]

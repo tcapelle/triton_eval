@@ -362,6 +362,154 @@ def entrypoint_wrapper_from_import_issue(z):
         "Some gibberish here and there torch and more text.",
         "any_entrypoint",
         {'is_valid': False, 'reason': 'Syntax error parsing source code.'}
+    ),
+    (
+        "valid_multi_layer_function_call",
+        """
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def triton_kernel(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x1 = xindex // 8 % 2
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
+
+def call_intermediate_function(args):
+    # Intermediate function that calls the Triton kernel
+    a, b, c = args
+    args.clear()
+    
+    # Use some whitelisted torch operations
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf1 = a  # Some operation here
+        triton_kernel[triton.Grid(128)](buf1, b, 128, XBLOCK=128)
+    
+    return buf1, a, b
+
+def entrypoint_wrapper(input, weight, bias):
+    # Wrapper function that calls an intermediate function
+    output = call_intermediate_function([input, weight, bias])
+    return output[0]
+""",
+        "entrypoint_wrapper",
+        {'is_valid': True, 'reason': ''}
+    ),
+    (
+        "valid_pixel_shuffle_pattern",
+        """
+import torch
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from typing import Optional
+
+@triton.jit
+def triton_poi_kernel(in_out_ptr0, in_ptr0, xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    tmp0 = tl.load(in_out_ptr0 + xindex, xmask)
+    tmp1 = tl.load(in_ptr0 + xindex, xmask)
+    tmp2 = tmp0 + tmp1
+    tl.store(in_out_ptr0 + xindex, tmp2, xmask)
+
+def call_func(args):
+    # Intermediate function that calls the Triton kernel
+    in_tensor, weight, bias = args
+    args.clear()
+    
+    # Use some whitelisted torch operations
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf1 = torch.empty_like(in_tensor)
+        triton_poi_kernel[grid(128)](buf1, bias, 128, XBLOCK=128)
+    
+    return buf1, in_tensor, weight
+
+def pixel_shuffle_conv2d(input, weight, bias=None):
+    # Multi-layer function call pattern
+    output = call_func([input, weight, bias])
+    return output[0]
+""",
+        "pixel_shuffle_conv2d",
+        {'is_valid': True, 'reason': ''}
+    ),
+    (
+        "valid_exact_pixel_shuffle_pattern",
+        """
+import torch
+import triton
+import triton.language as tl
+from torch._inductor.runtime.triton_heuristics import grid
+from torch._C import _cuda_getCurrentRawStream as get_raw_stream
+from torch._inductor.runtime import triton_helpers
+import torch.nn.functional as F
+from typing import Optional
+assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+
+
+@triton.jit
+def triton_poi_fused_convolution_pixel_shuffle_0(in_out_ptr0, in_ptr0,
+    xnumel, XBLOCK: tl.constexpr):
+    xnumel = 128
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex < xnumel
+    x3 = xindex
+    x1 = xindex // 8 % 2
+    tmp0 = tl.load(in_out_ptr0 + x3, xmask)
+    tmp1 = tl.load(in_ptr0 + x1, xmask, eviction_policy='evict_last')
+    tmp2 = tmp0 + tmp1
+    tl.store(in_out_ptr0 + x3, tmp2, xmask)
+
+
+def call(args):
+    primals_1, primals_2, primals_3 = args
+    args.clear()
+    assert_size_stride(primals_1, (4, 4, 4, 4), (64, 16, 4, 1))
+    assert_size_stride(primals_2, (4, 1, 4, 4), (16, 16, 4, 1))
+    assert_size_stride(primals_3, (4,), (1,))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = torch.zeros((4, 4, 1, 1), device='cuda')  # Simpler than extern_kernels.convolution for testing
+        assert_size_stride(buf0, (4, 4, 1, 1), (4, 1, 1, 1))
+        buf1 = buf0
+        del buf0
+        get_raw_stream(0)
+        triton_poi_fused_convolution_pixel_shuffle_0[grid(128)](buf1,
+            primals_3, 128, XBLOCK=128, num_warps=4, num_stages=1)
+        del primals_3
+    return buf1, primals_1, primals_2
+
+
+def pixel_shuffle_conv2d(
+        input: torch.Tensor, 
+        weight: torch.Tensor, 
+        bias: Optional[torch.Tensor]=None, 
+        stride: int=1, 
+        padding: int=0, 
+        dilation: int=1, 
+        groups: int=1, upscale_factor: int=2) -> torch.Tensor:
+    primals_3 = bias
+    primals_1 = input
+    primals_2 = weight
+    output = call([primals_1, primals_2, primals_3])
+    return output[0]
+""",
+        "pixel_shuffle_conv2d",
+        {'is_valid': True, 'reason': ''}
     )
 ]
 
