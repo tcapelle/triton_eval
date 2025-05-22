@@ -16,6 +16,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 console = Console()
 
+
+
 use_openai = False
 
 if not use_openai:
@@ -26,13 +28,21 @@ else:
 if not use_openai:
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
-    MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
+    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206-v1"
     # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-309-v2"
+    # MODEL_NAME = "qwen-coder-14b-ft-v3"
+    # MODEL_NAME = "qwen-coder-32b-ft-v1"
+    # MODEL_NAME = "qwen3-14b-ft"
+    # MODEL_NAME = "qwen3-14b-sft-grpo"
+    # MODEL_NAME = "qwen3-14b-sft4"
+    # MODEL_NAME = "predibase-32b"
+    # MODEL_NAME = "kernelllm"
+    MODEL_NAME = "qwen-14b-sft"
 else:
-    MODEL_NAME = "o4-mini-2025-04-16"
+    MODEL_NAME = "codex-mini-latest"
 
 
 
@@ -46,7 +56,7 @@ class ScriptArgs:
     base_url: str = CUSTOM_BASE_URL
     model_name: str = MODEL_NAME
     temperature: float = TEMPERATURE
-    max_tokens: int = 3000
+    max_tokens: int = 6000
     weave_project: str = "grpo-cuda/triton-bench"
     weave_dataset: str = "Tritonbench_T_v2:latest"
     debug: bool = False
@@ -68,36 +78,77 @@ if args.debug:
 
 ## TRAINING PROMPT ###########################
 system_prompt = """
-You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters. 
-
+You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters.
 # Instructions
-- Ensure that the wrapper function fully corresponds to the provided function information.
-- Generate a detailed plan on how to convert and optimize the Pytorch code to a Triton kernel before writing the code.
-- The reasoning process MUST BE enclosed within <think> and </think> tags."
-- Reply with the thinking process and a single blob of code surrounded with ```python and ```.
+- Ensure that the Triton wrapper function matches the signature of the provided PyTorch function and calls the Triton implementation.
+- Generate a detailed plan on how to convert and optimize the PyTorch code to a Triton kernel before writing the code.
+- The reasoning process MUST BE enclosed within <think> and </think> tags.
+- Reply with the reasoning process and the Triton kernel within a single code block enclosed in "```python" and "```".
 """
 
 user_prompt = """Convert the following PyTorch code to a Triton kernel.
 Pytorch code:
-```python
-{pt_code}```
 
-The function should have the same name as the PyTorch function. 
-
-Don't forget to format your answer as:
-<think>
-thinking process
-</think>
 ```python
-code
-```"""
+{pt_code}
+```
+
+The entrypoint function must be named: {entrypoint}
+The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
+
+No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
+"""
+
+##############################################
+
+predibase_system_prompt = """You are a helpful assistant that converts PyTorch code into Triton kernels."""
+
+
+predibase_user_prompt = """Convert this PyTorch module implementation into an equivalent Triton kernel:
+
+<torch_code>
+{pt_code}
+</torch_code>
+
+The Triton kernel should:
+1. Import torch, triton, and triton.language as tl and other necessary modules
+2. Use @triton.jit decorator on the kernel implementation (not the entrypoint function)
+3. Have proper grid and block sizes
+4. Use a mask in the load/store operations
+5. Use typed constants (tl.constexpr)
+6. Handle tensor dimensions correctly
+7. Return output matching PyTorch's implementation
+8. Do not include any test code in your response, only the Triton kernel implementation and entrypoint function
+
+The entrypoint function must be named: {entrypoint}
+The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
+
+No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
+
+The final generated code in the response must start with <triton_code> and end with </triton_code> tags.
+"""
+
+@weave.op
+def predibase_extract_code(code: str) -> str:
+    pattern = r"<triton_code>(.*?)</triton_code>"
+    matches = re.findall(pattern, code, re.DOTALL)
+    if matches:
+        return matches[-1].strip()  # Get the last match
+    else:
+        return ""
+
+    
+# extract_code = predibase_extract_code
+# system_prompt = predibase_system_prompt
+# user_prompt = predibase_user_prompt
 
 ##############################################
 
 
+
 def call_model(system_prompt: str, user_prompt: str, model_name: str, **model_kwargs):
     "Use reponse API for o3/o4 models, otherwise use chat completion"
-    if model_name.startswith("o"):
+    if model_name.startswith("o") or model_name.startswith("codex"):
         out = client.responses.create(
             model=model_name,
             input=[{"role": "system", "content": system_prompt}, 
@@ -126,12 +177,12 @@ class OpenAICompatibleModel(weave.Model):
 
 
     @weave.op
-    def predict(self, pt_code: str):
+    def predict(self, pt_code: str, entrypoint: str):
         code = remove_tests(pt_code)
         "Takes a code string and returns a response from the model"
         out = call_model(
             self.system_prompt, 
-            self.user_prompt.format(pt_code=code), 
+            self.user_prompt.format(pt_code=code, entrypoint=entrypoint), 
             self.model_name, 
             temperature=self.temperature, 
             max_tokens=self.max_tokens)
