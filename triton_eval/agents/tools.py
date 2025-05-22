@@ -154,7 +154,7 @@ def clear_temp_files():
 
 
 @weave.op
-def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[int, str]]:
+def run_python_code(code: str, env: dict[str, str] = None, timeout: int = 60) -> dict[str, Union[int, str]]:
     """Executes a snippet of Python code.
 
     Args:
@@ -163,7 +163,7 @@ def run_python_code(code: str, env: dict[str, str] = None) -> dict[str, Union[in
     """
     file_path = save_to_temp_file(code)
     # The run_python_file function now returns the dictionary directly
-    return run_python_file(file_path, env)
+    return run_python_file(file_path, env, timeout)
 
 @weave.op
 def run_python_in_process(code: str):
