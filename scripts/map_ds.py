@@ -13,6 +13,9 @@ class Args:
     num_proc: int = 20
     weave_project: str = "grpo-cuda/sft_ds"
     output_ds_name: str = "tcapelle/train_ds_triton_sft"
+    pt_col: str = "pt_code_without_tests"
+    triton_col: str = "input"
+    entrypoint_col: str = "entrypoint"
     debug: bool = False
 
 args = sp.parse(Args)
@@ -48,7 +51,6 @@ You are an expert GPU‐kernel reasoner and Triton evangelist. You will be given
 
 ### 2. Conversion Plan  
 A numbered list of **8–12 steps**. Each step must:  
-- Begin with “To convert this PyTorch code to Triton, we will need to…”  
 - Describe one concept or decision in detail (index calculations, grid dimensions, block/tile mapping, masking, memory layout, fusion, numerical‐stability tricks, vectorization strategy, etc.).  
 - Reference the specific PyTorch lines or operations and their Triton equivalents (`tl.load`, `tl.store`, `tl.arange`, `program_id`, masks, etc.).  
 - Explain *why* each constant or strategy is chosen (block size, tile shape, use of shared memory vs. registers, data types).  
@@ -77,9 +79,10 @@ To make our life easier, enclose all the reasoning and conversion plan with <thi
 def relu(x: torch.Tensor) -> torch.Tensor:
     # x: FloatTensor[N, M]
     return torch.maximum(x, torch.zeros_like(x))
-
+```
 
 **Triton Code**
+```python
 import triton
 import triton.language as tl
 
@@ -102,6 +105,7 @@ def relu(x, BLOCK_SIZE: int = 1024):
         BLOCK_SIZE
     )
     return y
+```
 
 **Expected Output**
 <think>
@@ -181,16 +185,16 @@ user_prompt = """
 
 Produce Conversion Plan and Final Implementation following the exact detailed format above. 
 The entrypoint function must be named: {entrypoint}
-The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
+The Triton kernel implementation (called by the entrypoint) must be named: triton_{entrypoint}_kernel
 
 No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation. 
 Enclose the conversion reasoning with <think> ... </think> and the implementation with <triton> ... </triton> tags."""
 
 @weave.op
 async def format_row(row):
-    pt_code = row["pt_code_without_tests"]
-    triton_code = row["input"]
-    entrypoint = row["entrypoint"]
+    pt_code = row[args.pt_col]
+    triton_code = row[args.triton_col]
+    entrypoint = row[args.entrypoint_col]
 
     messages = [
         {"role": "system", "content": system_prompt},

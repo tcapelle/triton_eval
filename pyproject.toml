@@ -9,6 +9,9 @@ dependencies = [
     "openai",
     "fastapi>=0.115.12",
     "uvicorn>=0.34.2",
+    "weave>=0.51.47",
+    "datasets>=3.6.0",
+    "simple-parsing>=0.1.7",
 ]
 
 [project.optional-dependencies]
