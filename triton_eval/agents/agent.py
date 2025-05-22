@@ -4,9 +4,9 @@ import tiktoken
 from typing import Any, Type
 import weave
 
-from agents.console import Console
-from agents.tools import DEFAULT_TOOLS
-from agents.tool_calling import chat_call_tool_params, perform_tool_calls
+from triton_eval.agents.console import Console
+from triton_eval.agents.tools import DEFAULT_TOOLS
+from triton_eval.agents.tool_calling import chat_call_tool_params, perform_tool_calls
 
 
 from openai import OpenAI

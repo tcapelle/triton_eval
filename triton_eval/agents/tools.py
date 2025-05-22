@@ -160,6 +160,7 @@ def run_python_code(code: str, env: dict[str, str] = None, timeout: int = 60) ->
     Args:
         code: The Python code string to execute.
         env: Optional dictionary of environment variables.
+        timeout: The timeout for the execution of the code.
     """
     file_path = save_to_temp_file(code)
     # The run_python_file function now returns the dictionary directly
@@ -244,3 +245,8 @@ def think(thought: str) -> str:
         thought: A thought to think about.
     """
     return thought
+
+DEFAULT_TOOLS = [
+    run_python_code,
+    think,
+]

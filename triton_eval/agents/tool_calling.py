@@ -7,7 +7,7 @@ from typing import Any, Callable, get_type_hints, TypedDict, get_origin
 
 from openai.types.chat import ChatCompletionMessageToolCall, ChatCompletionToolParam
 
-from agents.console import Console
+from triton_eval.agents.console import Console
 
 class TypedDictLike:
     __required_keys__: frozenset[str]
