@@ -15,8 +15,7 @@ datasets:
     split: train
     # split_thinking: true
     eot_tokens: ["<|im_end|>"]
-
-  - path: axolotl-ai-internal/gpumode-py2triton-reasoning-v2-filtered
+  - path: tcapelle/boostrap_triton
     type: chat_template
     split: train
     # split_thinking: true
