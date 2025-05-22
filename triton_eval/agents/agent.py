@@ -4,9 +4,9 @@ import tiktoken
 from typing import Any, Type
 import weave
 
-from my_smol_agent.console import Console
-from my_smol_agent.tools import DEFAULT_TOOLS
-from my_smol_agent.tool_calling import chat_call_tool_params, perform_tool_calls
+from agents.console import Console
+from agents.tools import DEFAULT_TOOLS
+from agents.tool_calling import chat_call_tool_params, perform_tool_calls
 
 
 from openai import OpenAI

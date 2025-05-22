@@ -10,7 +10,8 @@ import openai
 import simple_parsing as sp
 from rich.console import Console
 
-from my_smol_agent.tools import remove_tests, extract_code, run_python_code
+from triton_eval.agents.tools import remove_tests, extract_code, run_python_code
+from triton_eval.kernel_checks import is_valid_kernel
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -190,25 +191,38 @@ class OpenAICompatibleModel(weave.Model):
     
 
 @weave.op
-def run_scorer(output, tests, stdout, runs):
+def run_scorer(output, tests, stdout, runs, entrypoint):
     "Runs the code and returns the output"
     gpu_id = random.choice(AVAILABLE_GPUS)
     
     # get triton from model output
     triton_code = extract_code(output)
 
+    # check valid kernel
+    analysis = is_valid_kernel(triton_code, entrypoint)
+
     triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     # Run the triton code
-    triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
-    triton_runs = triton_output["status_code"] == 0
-    triton_stdout = triton_output["stdout"]
-    match = (stdout == triton_stdout and runs and triton_runs)
+    if analysis["is_valid"]:
+        triton_output = run_python_code(triton_and_test, env={"CUDA_VISIBLE_DEVICES": str(gpu_id)}, timeout=TIMEOUT)
+        triton_runs = triton_output["status_code"] == 0
+        triton_stdout = triton_output["stdout"]
+        match = (stdout == triton_stdout and runs and triton_runs)
+    else:
+        match = False
+        triton_runs = False
+        triton_stdout = ""
 
-    return {"triton_runs": triton_runs,
-            "triton_stdout": triton_stdout,
-            "pt_runs": runs,
-            "match": match}
+    result = {
+        "triton_runs": triton_runs,
+        "triton_stdout": triton_stdout,
+        "pt_runs": runs,
+        "match": match,
+        "analysis": analysis
+    }
+
+    return result
 
 @weave.op
 def think_scorer(output):

@@ -1,5 +1,5 @@
 import pytest
-from kernel_checks import is_valid_kernel
+from triton_eval.kernel_checks import is_valid_kernel
 
 # Test cases: (id, source_code, entrypoint, expected_result)
 # expected_result is now a dict: {'is_valid': bool, 'reason': str}

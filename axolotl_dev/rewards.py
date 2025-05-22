@@ -14,8 +14,8 @@ import asyncio
 import torch.distributed as dist
 import logging
 from contextlib import nullcontext
-from tools import extract_code, run_python_code  # run_python_in_process no longer used
-from kernel_checks import is_valid_kernel
+from triton_eval.agents.tools import extract_code, run_python_code  # run_python_in_process no longer used
+from triton_eval.kernel_checks import is_valid_kernel
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -148,6 +148,7 @@ VALID_TL_METHODS = set(tl_methods)
 
 # ===== Reward Functions =====
 @weave.op
+
 def think_scorer(output):
     "Check if the output has exactly one <think> block with content >= 100 chars"
     thinking_content = re.findall(r"<think>(.*?)</think>", output, re.DOTALL)

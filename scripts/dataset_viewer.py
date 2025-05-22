@@ -230,7 +230,7 @@ def interactive_loop(args: Args, original_dataset_obj: Any, dataset_features: di
     while True:
         console.rule("[bold yellow]Interactive Mode[/bold yellow]")
         command_str = Prompt.ask(
-            "Press Enter for next batch, or 'q' to quit:",
+            "Press Enter for next batch, or 'q' to quit",
             default="", # Default to empty string for Enter key
             show_default=False
         ).strip().lower()

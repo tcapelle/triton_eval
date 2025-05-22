@@ -244,10 +244,3 @@ def think(thought: str) -> str:
         thought: A thought to think about.
     """
     return thought
-
-DEFAULT_TOOLS = [
-    run_python_code,
-    save_to_file,
-    read_file,
-    think,
-]

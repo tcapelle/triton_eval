@@ -1,6 +1,4 @@
-# base_model: Qwen/Qwen2.5-Coder-14B-Instruct
-base_model: winglian/seed-coder-triton-8b-v1
-
+base_model: predibase/Predibase-T2T-32B-RFT
 # base_model: /workspace/data/axolotl-artifacts/grpo-beta-zero
 # Automatically upload checkpoint and final model to HF
 # hub_model_id: username/custom_model_name
@@ -14,12 +12,13 @@ strict: false
 rl: grpo
 trl:
   beta: 0.0
-  max_completion_length: 8192
+  max_completion_length: 6000
   num_generations: 16
   use_vllm: true
   vllm_server_host: "axolotl-vllm-service"
   vllm_server_port: 8000
   reward_funcs:
+    - rewards.reset_rewards_server
     - rewards.think_reward
     - rewards.one_code_blob_reward
     - rewards.reward_code_runs
@@ -34,14 +33,14 @@ trl:
     vllm_gpu_memory_utilization: 0.9
 
 
-chat_template: llama3
+chat_template: qwen_25
 datasets:
   - path: tcapelle/train_ds_triton
     split: train
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
-output_dir: /model-checkpoints/seed-coder-8b
+output_dir: /model-checkpoints/predibase-32b
 
 dataloader_prefetch_factor: 32
 dataloader_num_workers: 2
@@ -49,24 +48,24 @@ dataloader_pin_memory: true
 
 gc_steps: 1
 
-sequence_len: 8192
+sequence_len: 6000
 sample_packing: false
 eval_sample_packing: false
 pad_to_sequence_len: false
 
 wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
-wandb_name: seed-coder-8b
+wandb_name: grpo-predibase-32b
 wandb_log_model: checkpoint
 
-gradient_accumulation_steps: 2
-micro_batch_size: 12  # should match num_generations / num_gpus
+gradient_accumulation_steps: 12
+micro_batch_size: 2  # should match num_generations / num_gpus
 num_epochs: 3
 
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
-learning_rate: 5.0e-7
-max_grad_norm: 0.5
+learning_rate: 1.0e-4
+max_grad_norm: 0.01
 weight_decay: 0.01
 
 bf16: true
@@ -78,7 +77,7 @@ gradient_checkpointing_kwargs:
 flash_attention: true
 
 logging_steps: 1
-warmup_steps: 100
+warmup_steps: 30
 evals_per_epoch: 1
 saves_per_epoch: 1
 save_total_limit: 2

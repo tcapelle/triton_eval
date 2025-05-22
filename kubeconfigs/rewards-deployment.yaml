@@ -25,12 +25,12 @@ spec:
                 operator: In
                 values:
                 - serving
-                - training
+                - training  
             topologyKey: "kubernetes.io/hostname"
       # imagePullSecrets: ...
       containers:
       - name: axolotl-rewards-container
-        image: ghcr.io/tcapelle/triton_eval:1605.2 # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:2105.1 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["python"]
         args:

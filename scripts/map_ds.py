@@ -1,22 +1,28 @@
+import weave
+import openai
 from dataclasses import dataclass
 from datasets import load_dataset, Dataset
 import simple_parsing as sp
 
+client = openai.AsyncOpenAI()
 
 @dataclass
 class Args:
-    ds_name: str = "tcapelle/train_ds_triton_sft"
+    ds_name: str = "tcapelle/train_ds_triton"
+    model: str = "o4-mini"
+    num_proc: int = 20
+    weave_project: str = "grpo-cuda/sft_ds"
+    output_ds_name: str = "tcapelle/train_ds_triton_sft"
     debug: bool = False
 
 args = sp.parse(Args)
 
 ds = load_dataset(args.ds_name)["train"]
 
-
 system_prompt = """
 # GPU‐Kernel Reasoner Prompt
 
-You are an expert GPU‐kernel reasoner and Triton evangelist. You will be given a PyTorch code snippet. Your goal is to:
+You are an expert GPU‐kernel reasoner and Triton evangelist. You will be given two code snippets—one in PyTorch and one in Triton—that implement the same tensor operation. Your goal is to:
 
 1. **Analyze the PyTorch implementation**  
    - Break down its algorithmic steps, memory access patterns, and computational characteristics.  
@@ -68,11 +74,34 @@ To make our life easier, enclose all the reasoning and conversion plan with <thi
 
 **PyTorch Code**  
 ```python
-import torch
 def relu(x: torch.Tensor) -> torch.Tensor:
     # x: FloatTensor[N, M]
     return torch.maximum(x, torch.zeros_like(x))
-```
+
+
+**Triton Code**
+import triton
+import triton.language as tl
+
+@triton.jit
+def triton_relu_kernel(X, Y, stride_row, stride_col, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < stride_row * stride_col
+    x_vals = tl.load(X + offs, mask=mask, other=0.0)
+    y_vals = tl.maximum(x_vals, 0.0)
+    tl.store(Y + offs, y_vals, mask=mask)
+
+def relu(x, BLOCK_SIZE: int = 1024):
+    n, m = x.shape
+    y = torch.empty_like(x)
+    grid = ((n * m + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    triton_relu_kernel[grid](
+        x.data_ptr(), y.data_ptr(),
+        m, 1,
+        BLOCK_SIZE
+    )
+    return y
 
 **Expected Output**
 <think>
@@ -105,7 +134,6 @@ def relu(x: torch.Tensor) -> torch.Tensor:
    11. We will include minimal comments in the kernel and wrapper mapping each code block back to steps 1–7.
 </think>
 
-3. Final Implementation
 <triton>
 import torch
 import triton
@@ -148,26 +176,53 @@ user_prompt = """
 ** PyTorch Code **
 {pt_code}
 
+** Triton Code **
+{triton_code}
+
 Produce Conversion Plan and Final Implementation following the exact detailed format above. 
 The entrypoint function must be named: {entrypoint}
-The Triton kernel implementation (called by the entrypoint) must be named: triton_{entrypoint}_kernel
+The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
 
 No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation. 
 Enclose the conversion reasoning with <think> ... </think> and the implementation with <triton> ... </triton> tags."""
 
-def format_example(example):
-    pt_code = example["pt_code_without_tests"]
-    entrypoint = example["entrypoint"]
-    output = example["reasoning"]
+@weave.op
+async def format_row(row):
+    pt_code = row["pt_code_without_tests"]
+    triton_code = row["input"]
+    entrypoint = row["entrypoint"]
 
-    # Format the prompt with the preprocessed code
-    return {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt.format(pt_code=pt_code, entrypoint=entrypoint)},
-            {"role": "assistant", "content": output},
-        ],
-    }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt.format(pt_code=pt_code, triton_code=triton_code, entrypoint=entrypoint)}
+    ]
 
-formatted_ds = ds.map(format_example)
-formatted_ds.push_to_hub(args.ds_name)
+    response = await client.responses.create(
+        model=args.model,
+        input=messages,
+    )
+    row.update({"reasoning": response.output_text.strip()})
+    return row
+
+import asyncio
+from weave.flow.util import async_foreach
+
+weave.init(args.weave_project)
+
+@weave.op
+async def map(ds, func, num_proc=10):
+    results = []
+    n_complete = 0
+    async for _, out_row in async_foreach(ds, func, max_concurrent_tasks=num_proc):
+        results.append(out_row)
+        n_complete += 1
+        print(f"Completed {n_complete} / {len(ds)}")
+    return results
+
+if args.debug:
+    ds = ds.select(range(10))
+
+out_ds = asyncio.run(map(ds, format_row, num_proc=args.num_proc))
+
+out_ds = Dataset.from_list(out_ds)
+out_ds.push_to_hub(args.output_ds_name)

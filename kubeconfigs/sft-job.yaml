@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: axolotl-training-job # Consider generateName for multiple runs: axolotl-training-job-
+  name: axolotl-sft-job # Consider generateName for multiple runs: axolotl-training-job-
   labels:
     app: axolotl-train
     task: training # Task label for anti-affinity
@@ -23,17 +23,10 @@ spec:
                 - serving
                 - rewards
             topologyKey: "kubernetes.io/hostname"
-      initContainers:
-      - name: wait-for-vllm
-        image: busybox:1.28 # Or any small image with nc/curl
-        command: ['sh', '-c', 'until nc -zv axolotl-vllm-service 8000; do echo "Waiting for VLLM service..."; sleep 5; done']
-      - name: wait-for-rewards
-        image: busybox:1.28 # Or any small image with nc/curl
-        command: ['sh', '-c', 'until nc -zv axolotl-rewards-service 9347; do echo "Waiting for rewards service..."; sleep 5; done']
       # imagePullSecrets: ...
       containers:
       - name: axolotl-train-container
-        image: ghcr.io/tcapelle/triton_eval:2105.1 # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:2005.1 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["axolotl"]
         args:
@@ -45,8 +38,6 @@ spec:
             secretKeyRef:
               name: wandb-api-key-secret # Name of the secret you created
               key: WANDB_API_KEY        # Key within the secret
-        - name: TRITON_SERVER_URL
-          value: "http://axolotl-rewards-service:9347"
         - name: WEAVE_PRINT_CALL_LINK
           value: "0"
         - name: TOKENIZERS_PARALLELISM
@@ -58,7 +49,6 @@ spec:
               key: HF_TOKEN        # Key within the hf-token-secret
         # You can add other environment variables here if needed
         # - name: ANOTHER_ENV_VAR
-        #   value: "some_value"
         volumeMounts:
           - mountPath: /dev/shm
             name: dshm
@@ -85,7 +75,7 @@ spec:
             sizeLimit: 500Gi # Adjust size as needed
         - name: config-volume
           configMap:
-            name: axolotl-config
+            name: axolotl-sft-config
       restartPolicy: OnFailure
       # tolerations: ...
       # nodeSelector: ...

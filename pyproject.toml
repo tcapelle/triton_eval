@@ -5,44 +5,11 @@ description = "A simple triton/cuda execution framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.6",
-    "numpy",
-    "pydantic",
-    "setuptools==75.8.0",
-    "ninja",
     "rich",
-    "simple_parsing",
-    "modal>=0.73.153",
-    "datasets>=3.5.0",
-    "openai>=1.72.0",
-    "weave>=0.51.42",
-    "smolagents>=1.13.0",
-    "ipykernel>=6.29.5",
-    "vllm>=0.8.4",
-    "trl",
-    "packaging==23.2",
-    "wheel>=0.45.1",
-    "colorama>=0.4.6",
-    "addict>=2.4.0",
-    "bitsandbytes>=0.45.5",
-    "peft>=0.15.2",
-    "fastcore>=1.8.1",
-    "evaluate>=0.4.3",
-    "optimum>=1.24.0",
-    "hf-transfer>=0.1.9",
-    "fire>=0.7.0",
+    "openai",
+    "fastapi>=0.115.12",
+    "uvicorn>=0.34.2",
 ]
 
 [tool.setuptools]
 packages = ["triton_eval"]
-
-[tool.uv.sources]
-trl = { git = "https://github.com/huggingface/trl.git", rev = "0dad4eb7ca8de6f93a76752a5773c0baecd4a3d3" }
-
-[dependency-groups]
-dev = [
-    "pytest>=8.3.5",
-]
-lint = [
-    "ruff>=0.11.4",
-]

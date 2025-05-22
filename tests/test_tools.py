@@ -1,5 +1,5 @@
 import pytest
-from tools import extract_code
+from triton_eval.agents.tools import extract_code
 
 # Test cases: (input_string, expected_output)
 test_cases = [
