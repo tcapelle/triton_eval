@@ -5,7 +5,6 @@ from datasets import load_dataset, IterableDataset
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.markdown import Markdown
 import random
 import sys
 
@@ -21,24 +20,8 @@ class Args:
     full: bool = sp.field(default=False, alias="-f", help="Display full content of cells without truncation")
     random: bool = False # "Display random rows"
     stream_dataset: bool = True # "Stream the dataset instead of downloading"
-    message_column_name: Optional[str] = None # "Name of the column to be rendered as messages (if specified and it's the only column displayed with --full)"
+    chat: Optional[str] = sp.field(default=None, alias="-c", help="Column name containing chat messages - displays only this column in conversation format")
     truncate_length: int = sp.field(default=100, alias="-t", help="Max number of characters to display for a cell when not in full mode")
-
-
-def format_messages_as_markdown(messages):
-    """Format a messages list as a markdown conversation."""
-    conversation = ""
-    for msg in messages:
-        role = msg.get('role', '')
-        content = msg.get('content', '')
-        
-        # Add separator between messages
-        if conversation:
-            conversation += "\n---\n\n"
-        
-        conversation += f"**{role.upper()}**:\n\n{content}\n"
-        
-    return conversation
 
 
 def get_dataset(args: Args) -> Tuple[Optional[List[dict]], Optional[dict], Optional[Any]]:
@@ -105,16 +88,8 @@ def prepare_table_rows(dataset_iterable, columns_to_show: List[str], args: Args)
         row_values = []
         for col_name in columns_to_show:
             value = item.get(col_name)
-            display_value = ""
-
-            if args.message_column_name is not None and col_name == args.message_column_name and isinstance(value, list):
-                if args.full:
-                    # This case is for when the message column is part of a larger table
-                    md_content = format_messages_as_markdown(value)
-                    display_value = md_content # Will be folded by table
-                else:
-                    display_value = f"{len(value)} messages. Use --full or select only this column with --message_column_name to see content."
-            elif isinstance(value, (list, dict)):
+            
+            if isinstance(value, (list, dict)):
                 display_value = str(value)
                 if not args.full and len(display_value) > args.truncate_length:
                     display_value = display_value[:args.truncate_length] + "..."
@@ -145,42 +120,53 @@ def create_dataset_preview_table(columns_to_show: List[str], processed_rows: Lis
 
 
 def _display_data(rows_to_display: List[dict], args: Args, columns_to_show: List[str], title_prefix: str = ""):
-    """Helper function to display a list of rows either as a table or direct message rendering."""
+    """Helper function to display a list of rows either as a table or simple chat format."""
     if not rows_to_display:
         console.print(f"[yellow]{title_prefix}No data to display.[/yellow]")
         return
 
-    render_only_message_column = (
-        args.message_column_name is not None and
-        args.full and
-        columns_to_show == [args.message_column_name]
-    )
-
-    if render_only_message_column:
-        panel_title = f"{title_prefix}Displaying content of [bold]{args.message_column_name}[/bold] column"
-        if hasattr(args, 'split'): # Add split info if available from args
-            panel_title += f" ({args.split} split)"
+    # If --chat is specified, only display that column in chat format
+    if args.chat is not None:
+        if args.chat not in rows_to_display[0]:
+            console.print(f"[red]Error: Column '{args.chat}' not found in dataset.[/red]")
+            return
+            
+        panel_title = f"{title_prefix}Chat conversations from column: [bold]{args.chat}[/bold]"
         console.print(Panel.fit(panel_title, border_style="blue"))
         
         for item_idx, item_data in enumerate(rows_to_display):
-            value = item_data.get(args.message_column_name)
-            if isinstance(value, list):
-                md_content = format_messages_as_markdown(value)
-                console.print(Panel(Markdown(md_content),
-                                    title=f"{title_prefix}Example {item_idx} - {args.message_column_name}",
-                                    border_style="blue"))
+            value = item_data.get(args.chat)
+            if isinstance(value, list) and len(value) > 0:
+                console.print(f"\n[bold cyan]Example {item_idx + 1}:[/bold cyan]")
+                console.rule(style="dim")
+                
+                for msg_idx, msg in enumerate(value):
+                    if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                        role = msg['role']
+                        content = msg['content']
+                        console.print(f"[bold]{role.upper()}:[/bold]")
+                        console.print(content)
+                        if msg_idx < len(value) - 1:  # Add separator between messages
+                            console.print("─" * 50)
+                    else:
+                        # Fallback: show the raw message if it doesn't have expected structure
+                        console.print(f"Message {msg_idx + 1}:")
+                        console.print(msg)
+                        if msg_idx < len(value) - 1:
+                            console.print("─" * 50)
             else:
-                console.print(f"[yellow]{title_prefix}Warning: Content of '{args.message_column_name}' in example {item_idx} is not a list, skipping full markdown render.[/yellow]")
-                console.print(str(value) if value is not None else "[None]")
+                console.print(f"[yellow]Example {item_idx + 1}: No chat messages or invalid format[/yellow]")
+                if value is not None:
+                    console.print(f"Raw value: {value}")
     else:
-        processed_rows = prepare_table_rows(rows_to_display, columns_to_show, args) # prepare_table_rows expects an iterable
+        # Regular table display
+        processed_rows = prepare_table_rows(rows_to_display, columns_to_show, args)
         table_title = f"{title_prefix}Dataset Preview"
-        if hasattr(args, 'split'): # Add split info if available from args
+        if hasattr(args, 'split'):
             table_title += f" ({args.split} split)"
-        preview_table = create_dataset_preview_table(columns_to_show, processed_rows, table_title, args) # Pass args for title construction inside
+        preview_table = create_dataset_preview_table(columns_to_show, processed_rows, table_title, args)
         if preview_table:
             console.print(preview_table)
-        # prepare_table_rows and create_dataset_preview_table already handle empty processed_rows
 
 
 def main():
@@ -197,13 +183,25 @@ def main():
         columns_to_show = get_columns_to_display(args, dataset_features)
         all_columns = list(dataset_features.keys()) 
         
+        # If --chat is specified, ignore column selection and show all columns info but only display the chat column
+        if args.chat is not None:
+            if args.chat not in all_columns:
+                console.print(f"[bold red]Error: Chat column '{args.chat}' not found in dataset.[/bold red]")
+                console.print(f"Available columns: {', '.join(all_columns)}")
+                sys.exit(1)
+            # We still show all column info for reference, but will only display the chat column
+        
         console.print(Panel.fit("Dataset Columns Information", border_style="blue"))
         column_table = Table(show_header=True)
         column_table.add_column("Column")
         column_table.add_column("Type")
         for col_info_name in all_columns:
             col_type = str(dataset_features[col_info_name])
-            column_table.add_row(col_info_name, col_type)
+            # Highlight the chat column if specified
+            if args.chat and col_info_name == args.chat:
+                column_table.add_row(f"[bold green]{col_info_name}[/bold green] (chat)", col_type)
+            else:
+                column_table.add_row(col_info_name, col_type)
         console.print(column_table)
         console.print("\n") 
 
