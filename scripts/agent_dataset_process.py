@@ -15,14 +15,12 @@ from triton_eval.agents.tools import clear_temp_files
 from triton_eval.utils import map
 import simple_parsing as sp
 
-from prompts import test_creator_prompt
-
 console = Console()
 
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/boostrap_triton"
+    input_dataset: str = "tcapelle/boostrap_triton_ran"
     output_dataset: str = "tcapelle/boostrap_triton_ran"
     weave_project: str = "grpo-cuda/dataset_agent"
     push: bool = False
@@ -52,7 +50,7 @@ clear_temp_files()
 weave.init(args.weave_project)
 
 
-system_message = """You are an expert PyTorch Triton programmer. Your task is to make sure the Triton code runs and is correct. Run it and check the output. If it doesn't work, fix it. You ahve access to tools to run code on GPU."""
+system_message = """You are an expert PyTorch Triton programmer. Your task is to make sure the Triton code runs and is correct. Run it and check the output. If it doesn't work, fix it. You have access to tools to run code on GPU."""
 
 
 class PytorchCodeWithTests(BaseModel):
@@ -62,37 +60,47 @@ class PytorchCodeWithTests(BaseModel):
     triton_stderr: str = Field(description="The stderr of the Triton code.")
 
 user_prompt = """Here is the triton code for the function {entrypoint}:
-```py{triton_code}\n #### \n {tests}```. Run it and check the outputs. Don't change the signature or the format."
+```py{triton_code}\n #### \n {tests}```. Run it and check the outputs. Don't change the signature or the format.
+
+Return the triton code only, without any tests.
 """
+
+
 
 @weave.op
 def func_to_map(row):
     triton_code = row["triton_code"]
     entrypoint = row["entrypoint"]
     tests = row["tests"]
-    try:
-        agent = Agent(model_name="o4-mini", system_message=system_message, silent=True, response_format=PytorchCodeWithTests)
-        agent_response = agent.run(
-            user_prompt=user_prompt.format(triton_code=triton_code, entrypoint=entrypoint, tests=tests), max_steps=10)
-        if agent_response.stop_reason == "done":
-            res = agent_response.final_response.model_dump()
-            res["stop_reason"] = agent_response.stop_reason
-            return res
-        else:
-            console.print(f"Stop reason: {agent_response.stop_reason}")
+    uprompt = user_prompt.format(triton_code=triton_code, entrypoint=entrypoint, tests=tests)
+    triton_stderr = row["triton_stderr"]
+    if triton_stderr and len(triton_stderr.strip()) > 0:
+        uprompt += f"\n\nLast time we ran this we got the following error:\n{triton_stderr}"
+        try:
+            agent = Agent(model_name="o4-mini", system_message=system_message, silent=True, response_format=PytorchCodeWithTests)
+            agent_response = agent.run(
+                user_prompt=uprompt, max_steps=10)
+            if agent_response.stop_reason == "done":
+                res = agent_response.final_response.model_dump()
+                res["stop_reason"] = agent_response.stop_reason
+                return res
+            else:
+                console.print(f"Stop reason: {agent_response.stop_reason}")
+                return {"triton_code_runs": False, 
+                        "triton_code": triton_code, 
+                        "triton_stdout": "", 
+                        "triton_stderr": "", 
+                        "stop_reason": agent_response.stop_reason}
+        except Exception as e:
+            print(f"Error: {e}")
             return {"triton_code_runs": False, 
                     "triton_code": triton_code, 
                     "triton_stdout": "", 
                     "triton_stderr": "", 
-                    "stop_reason": agent_response.stop_reason}
-    except Exception as e:
-        print(f"Error: {e}")
-        return {"triton_code_runs": False, 
-                "triton_code": triton_code, 
-                "triton_stdout": "", 
-                "triton_stderr": "", 
-                "stop_reason": str(e)}
-
+                    "stop_reason": str(e)}
+    else:
+        return row
+    
 console.rule("[bold blue]Processing dataset[/bold blue]")
 
 if args.debug:
