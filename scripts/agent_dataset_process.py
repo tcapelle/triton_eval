@@ -3,6 +3,7 @@
 
 import asyncio
 from weave.flow.util import async_foreach
+from weave.trace.op_caller import async_call
 import openai
 import weave
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from datasets import load_dataset, load_from_disk, Dataset
 from pydantic import BaseModel, Field
 from triton_eval.agents.agent import Agent
 from triton_eval.agents.tools import clear_temp_files
+from triton_eval.utils import map
 import simple_parsing as sp
 
 from prompts import test_creator_prompt
@@ -21,10 +23,10 @@ console = Console()
 class Args:
     debug: bool = False
     input_dataset: str = "tcapelle/boostrap_triton"
-    output_dataset: str = "tcapelle/boostrap_triton"
+    output_dataset: str = "tcapelle/boostrap_triton_ran"
     weave_project: str = "grpo-cuda/dataset_agent"
     push: bool = False
-
+    num_proc: int = 10
 
 args = sp.parse(Args)
 
@@ -49,59 +51,56 @@ clear_temp_files()
 
 weave.init(args.weave_project)
 
-async def func_to_map(row):
-    class PytorchCodeWithTests(BaseModel):
-        tests_code: str = Field(description="The tests code for the pytorch code. No ```python or ``` needed, just the code")
-        pt_code_runs: bool = Field(description="Whether the pytorch code runs or not.")
-        entrypoint: str = Field(description="The entrypoint of the pytorch code. It should match the tests naming test_<entrypoint>")
 
-    pytorch_code = row["pt_code"]
-    entrypoint = row["pt_entrypoint"]
-    runs = False
-    if runs:
-        return row
+system_message = """You are an expert PyTorch Triton programmer. Your task is to make sure the Triton code runs and is correct. Run it and check the output. If it doesn't work, fix it. You ahve access to tools to run code on GPU."""
+
+
+class PytorchCodeWithTests(BaseModel):
+    triton_code_runs: bool = Field(description="Whether the Triton code runs or not.")
+    triton_code: str = Field(description="The Triton code to run. No ```python or ``` needed, just the code")
+    triton_stdout: str = Field(description="The stdout of the Triton code.")
+    triton_stderr: str = Field(description="The stderr of the Triton code.")
+
+user_prompt = """Here is the triton code for the function {entrypoint}:
+```py{triton_code}\n #### \n {tests}```. Run it and check the outputs. Don't change the signature or the format."
+"""
+
+@weave.op
+def func_to_map(row):
+    triton_code = row["triton_code"]
+    entrypoint = row["entrypoint"]
+    tests = row["tests"]
     try:
-        agent = Agent(model_name="o4-mini", system_message=test_creator_prompt, silent=True, response_format=PytorchCodeWithTests)
+        agent = Agent(model_name="o4-mini", system_message=system_message, silent=True, response_format=PytorchCodeWithTests)
         agent_response = agent.run(
-            user_prompt=f"Here is the pytorch code for the function {entrypoint}:\n\n```py{pytorch_code}```. Create the tests for the code and make sure they run.", max_steps=10)
+            user_prompt=user_prompt.format(triton_code=triton_code, entrypoint=entrypoint, tests=tests), max_steps=10)
         if agent_response.stop_reason == "done":
             res = agent_response.final_response.model_dump()
             res["stop_reason"] = agent_response.stop_reason
-            console.print(f"=============== Fixed code ==========================")
             return res
         else:
-            console.print(f"=============== Failed to fix code ==========================")
             console.print(f"Stop reason: {agent_response.stop_reason}")
-            return {"format_pt_code": pytorch_code, 
-                    "pt_code_runs": False, 
-                    "entrypoint": entrypoint, 
+            return {"triton_code_runs": False, 
+                    "triton_code": triton_code, 
+                    "triton_stdout": "", 
+                    "triton_stderr": "", 
                     "stop_reason": agent_response.stop_reason}
     except Exception as e:
         print(f"Error: {e}")
-        return {"format_pt_code": pytorch_code, 
-                "pt_code_runs": False, 
-                "entrypoint": entrypoint, 
-                "stop_reason": e}
-
-
-@weave.op
-async def map(ds, func, num_proc=10):
-    results = []
-    n_complete = 0
-    async for _, out_row in async_foreach(ds, func, max_concurrent_tasks=num_proc):
-        results.append(out_row)
-        n_complete += 1
-        print(f"Completed {n_complete} / {len(ds)}")
-    return results
+        return {"triton_code_runs": False, 
+                "triton_code": triton_code, 
+                "triton_stdout": "", 
+                "triton_stderr": "", 
+                "stop_reason": str(e)}
 
 console.rule("[bold blue]Processing dataset[/bold blue]")
-if args.debug:
-    ds = input_ds.select(range(10))
-    _ = asyncio.run(map(input_ds.select(range(5)), func_to_map, num_proc=5))
-else:
-    pds_list = asyncio.run(map(input_ds, func_to_map, num_proc=10))
-    pds = Dataset.from_list(pds_list)
-    pds.save_to_disk(args.output_dataset)
 
-    if args.push:
-        pds.push_to_hub(args.output_dataset)
+if args.debug:
+    input_ds = input_ds.select(range(10))
+
+pds_list = asyncio.run(map(input_ds, func_to_map, num_proc=2 if args.debug else args.num_proc))
+pds = Dataset.from_list(pds_list)
+pds.save_to_disk(args.output_dataset.replace("/", "_"))
+
+if args.push:
+    pds.push_to_hub(args.output_dataset)

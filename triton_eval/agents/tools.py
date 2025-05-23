@@ -16,6 +16,9 @@ import textwrap
 TEMP_FILES_DIR = Path("./temp_files")
 TEMP_FILES_DIR.mkdir(exist_ok=True)
 
+AVAILABLE_GPUS = [4, 5, 6, 7]
+
+
 @weave.op
 def extract_code(text: str) -> str:
     """
@@ -173,7 +176,6 @@ def run_python_code_on_gpu(code: str, timeout: int = 60) -> dict[str, Union[int,
         code: The Python code string to execute.
         timeout: The timeout for the execution of the code.
     """
-    AVAILABLE_GPUS = [4, 5, 6, 7]
     gpu_id = random.choice(AVAILABLE_GPUS)
     env = {"CUDA_VISIBLE_DEVICES": str(gpu_id)}
     return run_python_code(code, env, timeout)
