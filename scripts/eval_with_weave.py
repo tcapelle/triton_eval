@@ -18,32 +18,25 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 console = Console()
 
 
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206-v1"
+# MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-309-v2"
+# MODEL_NAME = "qwen-coder-14b-ft-v3"
+# MODEL_NAME = "qwen-coder-32b-ft-v1"
+# MODEL_NAME = "qwen3-14b-ft"
+# MODEL_NAME = "qwen3-14b-sft-grpo"
+# MODEL_NAME = "qwen3-14b-sft4"
+# MODEL_NAME = "predibase-32b"
+# MODEL_NAME = "kernelllm"
+# MODEL_NAME = "qwen-14b-sft"
+# MODEL_NAME = "devstral"
+# MODEL_NAME = "qwen3-14b"
+MODEL_NAME = "qwen2.5-coder-14b-instruct"
 
-use_openai = False
-
-if not use_openai:
-    CUSTOM_BASE_URL = "http://0.0.0.0:8000/v1"
-else:
-    CUSTOM_BASE_URL = None
-
-if not use_openai:
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct-ft"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-206-v1"
-    # MODEL_NAME = "Qwen/Qwen2.5-Coder-14B-Instruct-ft-309-v2"
-    # MODEL_NAME = "qwen-coder-14b-ft-v3"
-    # MODEL_NAME = "qwen-coder-32b-ft-v1"
-    # MODEL_NAME = "qwen3-14b-ft"
-    # MODEL_NAME = "qwen3-14b-sft-grpo"
-    # MODEL_NAME = "qwen3-14b-sft4"
-    # MODEL_NAME = "predibase-32b"
-    # MODEL_NAME = "kernelllm"
-    MODEL_NAME = "qwen-14b-sft"
-else:
-    MODEL_NAME = "codex-mini-latest"
 
 
 
@@ -54,21 +47,27 @@ AVAILABLE_GPUS = [4, 5, 6, 7]
 @dataclass
 class ScriptArgs:
     trials: int = 1
-    base_url: str = CUSTOM_BASE_URL
     model_name: str = MODEL_NAME
     temperature: float = TEMPERATURE
     max_tokens: int = 6000
     weave_project: str = "grpo-cuda/triton-bench"
     weave_dataset: str = "Tritonbench_T_v2:latest"
     debug: bool = False
+    use_openai: bool = False
 
 console.rule("[bold green]Running Weave Eval[/bold green]")
 
 args = sp.parse(ScriptArgs)
 print(args)
 
+
+if not args.use_openai:
+    CUSTOM_BASE_URL = "http://0.0.0.0:8000/v1"
+else:
+    CUSTOM_BASE_URL = None
+
 client = openai.OpenAI(
-    base_url=args.base_url,
+    base_url=CUSTOM_BASE_URL,
 )
 weave.init(args.weave_project)
 
@@ -79,12 +78,53 @@ if args.debug:
 
 ## TRAINING PROMPT ###########################
 system_prompt = """
-You are an expert in Triton programming, capable of writing corresponding Triton kernels and wrapper functions based on functional descriptions and function parameters.
-# Instructions
-- Ensure that the Triton wrapper function matches the signature of the provided PyTorch function and calls the Triton implementation.
-- Generate a detailed plan on how to convert and optimize the PyTorch code to a Triton kernel before writing the code.
-- The reasoning process MUST BE enclosed within <think> and </think> tags.
-- Reply with the reasoning process and the Triton kernel within a single code block enclosed in "```python" and "```".
+# GPU‐Kernel Reasoner Prompt
+
+You are an expert GPU‐kernel reasoner and Triton evangelist. You will be given a PyTorch code snippet. Your goal is to:
+
+1. **Analyze the PyTorch implementation**  
+   - Break down its algorithmic steps, memory access patterns, and computational characteristics.  
+   - Identify potential performance bottlenecks or numerical‐stability issues in the PyTorch version.  
+   - List the **Pros** of the existing PyTorch code (e.g., readability, use of optimized libraries) and the **Cons** (e.g., extra memory traffic, kernel launch overhead).
+
+2. **Build a detailed Conversion Plan**  
+   - Walk through *every* design decision and transformation needed to convert the PyTorch code into a high‐performance Triton kernel plus a Python wrapper.  
+
+3. **Deliver the Final Implementation**  
+   - The Triton kernel annotated with key parameters.  
+   - A drop‐in Python wrapper matching the original PyTorch function’s signature.
+
+---
+
+## Output Format
+
+### 1. PyTorch Analysis  
+- **Algorithmic Steps:** numbered list of what the PyTorch code does.  
+- **Memory & Compute Characteristics:** brief notes on data layout, reductions, fusions, etc.  
+- **Pros:** bullet list of strengths in the current implementation.  
+- **Cons:** bullet list of limitations or inefficiencies that Triton could address.
+
+### 2. Conversion Plan  
+A numbered list of **8–12 steps**. Each step must:  
+- Describe one concept or decision in detail (index calculations, grid dimensions, block/tile mapping, masking, memory layout, fusion, numerical‐stability tricks, vectorization strategy, etc.).  
+- Reference the specific PyTorch lines or operations and their Triton equivalents (`tl.load`, `tl.store`, `tl.arange`, `program_id`, masks, etc.).  
+- Explain *why* each constant or strategy is chosen (block size, tile shape, use of shared memory vs. registers, data types).  
+- Include notes on performance considerations (kernel launch overhead, memory bandwidth, GPU occupancy) and any numerical‐stability hacks (e.g., subtracting the max before `exp`).
+
+### 3. Final Implementation  
+Two fenced Python code blocks:
+
+1. **Triton Kernel**  
+   - Annotated with parameter comments (`stride`, `BLOCK_SIZE`, etc.).  
+   - Inline markers showing where each step of the Conversion Plan is realized.
+
+2. **Python Wrapper**  
+   - Exact same function name and signature as the original PyTorch version.  
+   - Allocates the output tensor, computes grid dimensions, launches the Triton kernel, and returns the result.  
+   - Contains concise comments linking back to key Conversion Plan steps.
+
+
+To make our life easier, enclose all the reasoning and conversion plan with <think> ... </think> tags. For the final implementation, reply with a single blob of code enclosed with <triton> ... </triton> tags.
 """
 
 user_prompt = """Convert the following PyTorch code to a Triton kernel.
@@ -98,6 +138,7 @@ The entrypoint function must be named: {entrypoint}
 The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
 
 No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
+Enclose the conversion reasoning with <think> ... </think> and the implementation with <triton> ... </triton> tags.
 """
 
 ##############################################
@@ -188,7 +229,7 @@ class OpenAICompatibleModel(weave.Model):
             temperature=self.temperature, 
             max_tokens=self.max_tokens)
         return out
-    
+
 
 @weave.op
 def run_scorer(output, tests, stdout, runs, entrypoint):
@@ -201,7 +242,7 @@ def run_scorer(output, tests, stdout, runs, entrypoint):
     # check valid kernel
     analysis = is_valid_kernel(triton_code, entrypoint)
 
-    triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
+    triton_and_test = f'import torch\nfrom typing import *\n{triton_code}\n\n{"#"*146}\n\n{tests}'
 
     # Run the triton code
     if analysis["is_valid"]:
@@ -209,19 +250,19 @@ def run_scorer(output, tests, stdout, runs, entrypoint):
         triton_runs = triton_output["status_code"] == 0
         triton_stdout = triton_output["stdout"]
         triton_stderr = triton_output["stderr"]
-        match = (stdout == triton_stdout and runs and triton_runs)
+        is_correct = (stdout == triton_stdout and runs and triton_runs)
     else:
-        match = False
+        is_correct = False
         triton_runs = False
         triton_stdout = ""
         triton_stderr = ""
     result = {
+        "is_valid": analysis["is_valid"],
         "triton_runs": triton_runs,
         "triton_stdout": triton_stdout,
         "triton_stderr": triton_stderr,
-        "pt_runs": runs,
-        "match": match,
-        "analysis": analysis
+        "is_correct": is_correct,
+        "validity": analysis["reason"]
     }
 
     return result
@@ -243,24 +284,8 @@ def think_scorer(output):
 
     return {"thinking_ok": thinking_ok, "thinking_length": thinking_length}
 
-@weave.op
-def one_code_blob(output):
-    "Check if the output has exactly one Python code blob"
-    code_blobs = re.findall(r"```python(.*?)```", output, re.DOTALL)
 
-    num_matches = len(code_blobs)
-    one_code_blob_ok = False
-    code_length = 0
-
-    if num_matches == 1:
-        content = code_blobs[0].strip()
-        code_length = len(content)
-        if code_length > 0:
-            one_code_blob_ok = True
-
-    return {"one_code_blob_ok": one_code_blob_ok, "code_length": code_length}
-
-scorers = [run_scorer, think_scorer, one_code_blob]
+scorers = [run_scorer, think_scorer]
 
 weave_model = OpenAICompatibleModel(
     model_name=args.model_name,
