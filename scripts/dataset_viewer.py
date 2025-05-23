@@ -20,7 +20,7 @@ class Args:
     full: bool = sp.field(default=False, alias="-f", help="Display full content of cells without truncation")
     random: bool = False # "Display random rows"
     stream_dataset: bool = True # "Stream the dataset instead of downloading"
-    chat: Optional[str] = sp.field(default=None, alias="-c", help="Column name containing chat messages - displays only this column in conversation format")
+    chat: Optional[str] = sp.field(default=None, help="Column name containing chat messages - displays only this column in conversation format")
     truncate_length: int = sp.field(default=100, alias="-t", help="Max number of characters to display for a cell when not in full mode")
 
 
