@@ -13,9 +13,9 @@ console = Console()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/boostrap_triton"
+    input_dataset: str = "tcapelle/boostrap_triton_ran"
     output_dataset: str = "tcapelle/boostrap_triton_ran"
-    weave_project: str = "grpo-cuda/dataset_agent"
+    weave_project: str = "grpo-cuda/dataset_map"
     push: bool = False
     num_proc: int = 10
     timeout: int = 60
@@ -42,26 +42,33 @@ clear_temp_files()
 
 weave.init(args.weave_project)
 
-
+@weave.op
 def run_code(row):
     triton_code = row["triton_code"]
     tests = row["tests"]
-    tests = tests.replace("_triton", "") # let's get rid of the triton naming..
-    code = f"{triton_code}\nfrom typing import *\n{tests}"
+    triton_code = triton_code.replace("_triton", "") # let's get rid of the triton naming..
+
+    code = f"{triton_code}\n\n# ==================\n\nfrom typing import *\n{tests}"
+    
     result = run_python_code_on_gpu(code, timeout=args.timeout)
     # result = {"status_code": 0, "stdout": result.stdout, "stderr": result.stderr}
     triton_runs = result["status_code"] == 0
     triton_stdout = result["stdout"]
     triton_stderr = result["stderr"]
-    return {tests: tests, "triton_runs": triton_runs, "triton_stdout": triton_stdout, "triton_stderr": triton_stderr}
+    return {"triton_code": triton_code, "triton_runs": triton_runs, "triton_stdout": triton_stdout, "triton_stderr": triton_stderr}
 
 console.rule("[bold blue]Processing dataset[/bold blue]")
 
 if args.debug:
     input_ds = input_ds.select(range(10))
 
-pds_list = asyncio.run(map(input_ds, run_code, num_proc=2 if args.debug else args.num_proc))
-pds = Dataset.from_list(pds_list)
+def process_ds():
+    pds_list = asyncio.run(map(input_ds, run_code, num_proc=2 if args.debug else args.num_proc))
+    pds = Dataset.from_list(pds_list)
+    return pds
+
+pds = process_ds()
+
 pds.save_to_disk(args.output_dataset.replace("/", "_"))
 
 if args.push:
