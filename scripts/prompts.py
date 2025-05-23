@@ -21,6 +21,7 @@ Let's generate a description of the following triton code. Make it concise and t
 class PytorchCodeWithTestCases(BaseModel):
     pytorch_code_with_test_cases: str = Field(description="A complete pure PyTorch implementation of the Triton code along with test cases")
     entrypoint: str = Field(description="The name of the function")
+
 generate_pytorch_prompt = """You are given a Triton kernel implementation along with a description of what it does. Your task is to generate:
 1. A complete pure PyTorch equivalent of the provided functionality.
 2. A comprehensive list of test cases in code form that validate the behavior of the function.
@@ -370,10 +371,13 @@ def test_addmm():
     results["test_case_2"] = addmm(input2, mat1_2, mat2_2, beta=0.5, alpha=2.0)
 
     # Test case 3: Zero beta
-    input3 = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device='cuda')
+    input3 = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device=DEVICE)
     mat1_3 = torch.tensor([[1.0, 0.0], [0.0, 1.0]], device=DEVICE)
     mat2_3 = torch.tensor([[5.0, 6.0], [7.0, 8.0]], device=DEVICE)
     results["test_case_3"] = addmm(input3, mat1_3, mat2_3, beta=0.0)
+
+    # Test case 4: bigger tensors
+    input4 = torch.randn(30, 20, device=DEVICE)
 
     return results
 
@@ -560,6 +564,7 @@ You have access to tools to run code, make sure to use it to validate your tests
 they have out parameters, do not assign them).
 - Store the results of all branch calculations in a dictionary, where the dictionary key is "test_case_n", with n
 representing the test case number.
+- Make sure to add one test with larger inputs, you can use torch.randn to create them.
 - Ensure that the import paths match exactly as described in the operator documentation to maintain accuracy.
 - The code should run directly, without if __name__ == "__main__".
 - Remember to run the code one last time to make sure the tests are fixed before returning the code.
@@ -619,10 +624,11 @@ def test_add():
     other3 = torch.tensor([4.0, 5.0, 6.0], device='cuda')
     results["test_case_3"] = add(input3, other3, alpha=0.5)
 
-    # Test case 4: Adding a tensor and a scalar with a specified alpha
-    input4 = torch.tensor([1.0, 2.0, 3.0], device='cuda')
-    other4 = 2.0
-    results["test_case_4"] = add(input4, other4, alpha=0.5)
+    # Test case 4: Larger inputs
+    input4 = torch.randn(30, 20, device=DEVICE)
+    other4 = torch.randn(30, 20, device=DEVICE)
+    alpha = 0.5
+    results["test_case_4"] = add(input4, other4, alpha=alpha)
 
     return results
 
@@ -630,3 +636,126 @@ test_results = test_add()
 print(test_results)
 ```
 """
+
+
+sft_system_prompt = """
+# GPU‐Kernel Reasoner Prompt
+
+You are an expert GPU‐kernel reasoner and Triton evangelist. You will be given two code snippets—one in PyTorch and one in Triton that implement the same tensor operation. Your goal is to:
+
+1. **Analyze the PyTorch implementation**  
+   - Break down its algorithmic steps, memory access patterns, and computational characteristics.  
+   - Identify potential performance bottlenecks or numerical‐stability issues in the PyTorch version.  
+   - List the **Pros** of the existing PyTorch code (e.g., readability, use of optimized libraries) and the **Cons** (e.g., extra memory traffic, kernel launch overhead).
+
+2. **Build a detailed Conversion Plan**  
+   - Walk through *every* design decision and transformation needed to convert the PyTorch code into a high‐performance Triton kernel plus a Python wrapper.  
+
+---
+
+## Output Format
+
+### 1. PyTorch Analysis  
+- **Algorithmic Steps:** numbered list of what the PyTorch code does.  
+- **Memory & Compute Characteristics:** brief notes on data layout, reductions, fusions, etc.  
+- **Pros:** bullet list of strengths in the current implementation.  
+- **Cons:** bullet list of limitations or inefficiencies that Triton could address.
+
+### 2. Conversion Plan  
+A numbered list of **8–12 steps**. Each step must:  
+- Describe one concept or decision in detail (index calculations, grid dimensions, block/tile mapping, masking, memory layout, fusion, numerical‐stability tricks, vectorization strategy, etc.).  
+- Reference the specific PyTorch lines or operations and their Triton equivalents (`tl.load`, `tl.store`, `tl.arange`, `program_id`, masks, etc.).  
+- Explain *why* each constant or strategy is chosen (block size, tile shape, use of shared memory vs. registers, data types).  
+- Include notes on performance considerations (kernel launch overhead, memory bandwidth, GPU occupancy) and any numerical‐stability hacks (e.g., subtracting the max before `exp`).
+
+### 3. Final Implementation  
+Two fenced Python code blocks:
+
+1. **Triton Kernel**  
+   - Annotated with parameter comments (`stride`, `BLOCK_SIZE`, etc.).  
+   - Inline markers showing where each step of the Conversion Plan is realized.
+
+2. **Python Wrapper**  
+   - Exact same function name and signature as the original PyTorch version.  
+   - Allocates the output tensor, computes grid dimensions, launches the Triton kernel, and returns the result.  
+   - Contains concise comments linking back to key Conversion Plan steps.
+
+
+To make our life easier, enclose all the reasoning and conversion plan with <think> ... </think> tags.
+---
+
+## Example
+
+**PyTorch Code**  
+```python
+def relu(x: torch.Tensor) -> torch.Tensor:
+    # x: FloatTensor[N, M]
+    return torch.maximum(x, torch.zeros_like(x))
+```
+
+**Triton Code**
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def triton_relu_kernel(X, Y, stride_row, stride_col, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < stride_row * stride_col
+    x_vals = tl.load(X + offs, mask=mask, other=0.0)
+    y_vals = tl.maximum(x_vals, 0.0)
+    tl.store(Y + offs, y_vals, mask=mask)
+
+def relu(x, BLOCK_SIZE: int = 1024):
+    n, m = x.shape
+    y = torch.empty_like(x)
+    grid = ((n * m + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    triton_relu_kernel[grid](
+        x.data_ptr(), y.data_ptr(),
+        m, 1,
+        BLOCK_SIZE
+    )
+    return y
+```
+
+**Expected Output**
+
+1. PyTorch Analysis:
+   - **Algorithmic Steps:**
+     1. Compute a zeros tensor of same shape via `torch.zeros_like(x)`.
+     2. Perform elementwise maximum between `x` and zeros → ReLU behavior.
+   - **Memory & Compute Characteristics:**
+     - Reads all N×M elements of `x` and writes N×M outputs.
+     - Simple elementwise operation ⇒ memory‐bound on large tensors.
+   - **Pros:**
+     - Leverages PyTorch’s built‐in vectorized maximum.
+     - Very readable and concise.
+   - **Cons:**
+     - Launches a full CUDA kernel under the hood for each op.
+     - No control over block size or fusion—memory traffic may dominate.
+     - No masking logic; PyTorch handles bounds automatically.
+
+2. Conversion Plan:
+   1. To convert this PyTorch code to Triton, we will need to flatten the 2D tensor into a 1D view so that each Triton program handles a contiguous BLOCK_SIZE chunk—mirrors PyTorch’s elementwise op across N×M elements.
+   2. To compute these chunks, we will launch a 1D grid of size `ceil(N*M / BLOCK_SIZE)` using `tl.program_id(0)` → `pid`.
+   3. Next, we will calculate the per-thread index range `offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)` to cover all elements in this block.
+   4. Because the total number of elements may not be divisible by BLOCK_SIZE, we will generate a boolean mask `mask = offs < (N*M)` so out-of-bounds threads do nothing.
+   5. We will use `tl.load(X + offs, mask=mask, other=0.0)` to fetch x values from global memory into registers, matching PyTorch’s read of `x`.
+   6. To implement ReLU, we will call `tl.maximum(x_vals, 0.0)`, which corresponds directly to `torch.maximum(x, 0)`.
+   7. We will write results back using `tl.store(Y + offs, y_vals, mask=mask)`, ensuring correct memory writes.
+   8. We will choose BLOCK_SIZE = 1024 (a power of two) to balance GPU occupancy and register usage—this gives good throughput on most NVIDIA architectures.
+   9. In the Python wrapper, we will preserve the original function signature `relu(x, BLOCK_SIZE=1024)` so it can be a drop-in replacement.
+   10. The wrapper will allocate an output tensor with `torch.empty_like(x)`, compute `grid = ((N*M + BLOCK_SIZE - 1) // BLOCK_SIZE,)`, and invoke the Triton kernel with the same pointer and stride parameters as PyTorch.
+   11. We will include minimal comments in the kernel and wrapper mapping each code block back to steps 1–7.
+
+"""
+
+sft_user_prompt = """
+** PyTorch Code **
+{pt_code}
+
+** Triton Code **
+{triton_code}
+
+As we already have the Triton Implementation, produce the Conversion Plan and reasoning for the conversion from the PyTorch code to the Triton code."""
