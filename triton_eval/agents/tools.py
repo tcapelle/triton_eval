@@ -10,8 +10,7 @@ import io
 import contextlib
 import traceback
 import importlib.util
-import tempfile
-import sys
+import random
 import textwrap
 
 TEMP_FILES_DIR = Path("./temp_files")
@@ -166,6 +165,19 @@ def run_python_code(code: str, env: dict[str, str] = None, timeout: int = 60) ->
     # The run_python_file function now returns the dictionary directly
     return run_python_file(file_path, env, timeout)
 
+def run_python_code_on_gpu(code: str, timeout: int = 60) -> dict[str, Union[int, str]]:
+    """
+    Executes a snippet of Python code on a GPU.
+
+    Args:
+        code: The Python code string to execute.
+        timeout: The timeout for the execution of the code.
+    """
+    AVAILABLE_GPUS = [4, 5, 6, 7]
+    gpu_id = random.choice(AVAILABLE_GPUS)
+    env = {"CUDA_VISIBLE_DEVICES": str(gpu_id)}
+    return run_python_code(code, env, timeout)
+
 @weave.op
 def run_python_in_process(code: str):
     """
@@ -247,6 +259,6 @@ def think(thought: str) -> str:
     return thought
 
 DEFAULT_TOOLS = [
-    run_python_code,
+    run_python_code_on_gpu,
     think,
 ]
