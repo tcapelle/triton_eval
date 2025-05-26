@@ -922,7 +922,7 @@ def relu(x: torch.Tensor) -> torch.Tensor:
 ```
 
 **Expected Output**
-<reasoning>
+<{reasoning_token}>
 1. PyTorch Analysis:
    - **Algorithmic Steps:**
      1. Compute a zeros tensor of same shape via `torch.zeros_like(x)`.
@@ -950,9 +950,9 @@ def relu(x: torch.Tensor) -> torch.Tensor:
    9. In the Python wrapper, we will preserve the original function signature `relu(x, BLOCK_SIZE=1024)` so it can be a drop-in replacement.
    10. The wrapper will allocate an output tensor with `torch.empty_like(x)`, compute `grid = ((N*M + BLOCK_SIZE - 1) // BLOCK_SIZE,)`, and invoke the Triton kernel with the same pointer and stride parameters as PyTorch.
    11. We will include minimal comments in the kernel and wrapper mapping each code block back to steps 1–7.
-</reasoning>
+</{reasoning_token}>
 
-<triton>
+<{code_token}>
 import torch
 import triton
 import triton.language as tl
@@ -987,7 +987,7 @@ def relu(x, BLOCK_SIZE: int = 1024):
         BLOCK_SIZE            # block size
     )
     return y
-</triton>
+</{code_token}>
 """
 
 eval_user_prompt = """
@@ -1002,4 +1002,4 @@ The entrypoint function must be named: {entrypoint}
 The Triton kernel implementation (called by the entrypoint) must be named: triton_{entrypoint}_kernel
 
 No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation. 
-Enclose the conversion reasoning with <reasoning> ... </reasoning> and the implementation with <triton> ... </triton> tags."""
+Enclose the conversion reasoning with <{reasoning_token}> ... </{reasoning_token}> and the implementation with <{code_token}> ... </{code_token}> tags."""

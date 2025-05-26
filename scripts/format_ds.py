@@ -13,6 +13,8 @@ class Args:
     triton_col: str = "triton_code"
     entrypoint_col: str = "pt_entrypoint"
     reasoning_col: str = None
+    code_token: str = "triton"
+    reasoning_token: str = "reasoning"
 
 args = sp.parse(Args)
 
@@ -28,8 +30,8 @@ def format_example(example):
     entrypoint = example[args.entrypoint_col]
 
     messages = [
-        {"role": "system", "content": format_system_prompt},
-        {"role": "user", "content": format_user_prompt.format(pt_code=pt_code, entrypoint=entrypoint)},
+        {"role": "system", "content": eval_system_prompt.format(code_token=args.code_token, reasoning_token=args.reasoning_token)},
+        {"role": "user", "content": eval_user_prompt.format(pt_code=pt_code, entrypoint=entrypoint, code_token=args.code_token, reasoning_token=args.reasoning_token)},
     ]
     if args.reasoning_col:
         reasoning = example[args.reasoning_col]
