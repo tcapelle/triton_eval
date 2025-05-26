@@ -1,4 +1,4 @@
-base_model: Qwen/Qwen3-14B
+base_model: Qwen/Qwen3-14B-Base
 
 plugins:
   - axolotl.integrations.liger.LigerPlugin
@@ -15,7 +15,7 @@ datasets:
     split: train
     # split_thinking: true
     eot_tokens: ["<|im_end|>"]
-  - path: tcapelle/boostrap_triton
+  - path: tcapelle/boostrap_triton_ran_sft
     type: chat_template
     split: train
     # split_thinking: true
@@ -23,21 +23,21 @@ datasets:
 
 dataset_prepared_path: last_run_prepared
 val_set_size: 0.05
-output_dir: /model-checkpoints/sft-qwen3-14b-v2-instruct
+output_dir: /model-checkpoints/sft-qwen3-14b-boot
 save_only_model: true
 
 sequence_len: 16384
-sample_packing: true
+sample_packing: false
 pad_to_sequence_len: true
 eval_sample_packing: false
 
 wandb_project: axolotl-sft
 wandb_entity: grpo-cuda
-wandb_name: sft-qwen3-14b-v2-instruct
-wandb_log_model: checkpoint
+wandb_name: sft-qwen3-14b-boot
+wandb_log_model: end
 
-gradient_accumulation_steps: 2
-micro_batch_size: 8
+gradient_accumulation_steps: 1
+micro_batch_size: 4
 num_epochs: 5
 optimizer: adamw_torch_fused
 max_grad_norm: 0.1
@@ -56,6 +56,6 @@ flash_attention: true
 
 warmup_steps: 60
 evals_per_epoch: 1
-saves_per_epoch: 1
+saves_per_epoch:
 weight_decay: 0.01
 deepspeed: deepspeed_configs/zero1.json
