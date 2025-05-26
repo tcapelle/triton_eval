@@ -6,6 +6,8 @@ metadata:
     app: axolotl-train
     task: training # Task label for anti-affinity
 spec:
+  ttlSecondsAfterFinished: 0              # ← delete Job immediately after it finishes
+  backoffLimit: 0   
   template:
     metadata:
       labels:
