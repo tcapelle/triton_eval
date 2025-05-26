@@ -8,8 +8,9 @@ class Args:
     ds_name: str = "tcapelle/boostrap_triton_ran"
     debug: bool = False
     pt_col: str = "pt_code"
+    triton_col: str = "triton_code"
     entrypoint_col: str = "pt_entrypoint"
-    output_col: str = None
+    reasoning_col: str = None
 
 args = sp.parse(Args)
 
@@ -171,8 +172,10 @@ def format_example(example):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt.format(pt_code=pt_code, entrypoint=entrypoint)},
     ]
-    if args.output_col:
-        output = example[args.output_col]
+    if args.reasoning_col:
+        reasoning = example[args.reasoning_col]
+        triton_code = example[args.triton_col]
+        output = f"<think>\n{reasoning}\n</think>\n\n3. Triton Code:\n<triton>\n{triton_code}\n</triton>"
         messages.append({"role": "assistant", "content": output})
 
 
@@ -185,4 +188,4 @@ def format_example(example):
 
 if not args.debug:
    formatted_ds = ds.map(format_example)
-   formatted_ds.push_to_hub(args.ds_name)
+   formatted_ds.push_to_hub(args.ds_name + "_sft")
