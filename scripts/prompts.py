@@ -680,8 +680,8 @@ Two fenced Python code blocks:
    - Allocates the output tensor, computes grid dimensions, launches the Triton kernel, and returns the result.  
    - Contains concise comments linking back to key Conversion Plan steps.
 
+Don't return the code, just the Analysis and Conversion plan.
 
-To make our life easier, enclose all the reasoning and conversion plan with <think> ... </think> tags.
 ---
 
 ## Example
@@ -751,6 +751,11 @@ def relu(x, BLOCK_SIZE: int = 1024):
 
 """
 
+
+class TorchTritonReasoning(BaseModel):
+    reasoning: str = Field(description="The reasoning for the conversion from the PyTorch code to the Triton code.")
+
+
 sft_user_prompt = """
 ** PyTorch Code **
 {pt_code}
@@ -758,4 +763,99 @@ sft_user_prompt = """
 ** Triton Code **
 {triton_code}
 
-As we already have the Triton Implementation, produce the Conversion Plan and reasoning for the conversion from the PyTorch code to the Triton code."""
+As we already have the Triton Implementation, produce the Conversion Plan and reasoning for the conversion from the PyTorch code to the Triton code. Don't return any code."""
+
+system_prompt_remove_func = """You are an expert Python programmer. Your task is to fix the tests"""
+
+
+user_prompt_remove_func = """
+You are presented with a Python test code like this:
+
+```python
+import torch
+
+def window_max(x: torch.Tensor, k: int) -> torch.Tensor:
+    \"\"\"
+    Computes the sliding window maximum of a 1D tensor with window size k.
+    Returns a tensor of length len(x) - k + 1, where each element i is the max over x[i:i+k].
+    \"\"\"
+    return x.unfold(0, k, 1).max(dim=1)[0]
+
+torch.manual_seed(42)
+
+def test_window_max():
+    results = {{}}
+
+    # Test case 1: Simple increasing sequence, k=2
+    x1 = torch.tensor([1, 2, 3, 4, 5], dtype=torch.float32, device='cuda')
+    k1 = 2
+    results["test_case_1"] = window_max(x1, k1)
+
+    # Test case 2: Sequence with negative values, k=3
+    x2 = torch.tensor([-1, -3, 2, 4, 0], dtype=torch.float32, device='cuda')
+    k2 = 3
+    results["test_case_2"] = window_max(x2, k2)
+
+    # Test case 3: All elements equal, k=4
+    x3 = torch.tensor([7, 7, 7, 7, 7], dtype=torch.float32, device='cuda')
+    k3 = 4
+    results["test_case_3"] = window_max(x3, k3)
+
+    # Test case 4: Large random input, k=10
+    x4 = torch.randn(1000, device='cuda')
+    k4 = 10
+    results["test_case_4"] = window_max(x4, k4)
+
+    return results
+
+test_results = test_window_max()
+print(test_results)
+```
+
+I want you to remove the function to test if it is present, returning onlty the tests:
+
+```python
+import torch
+torch.manual_seed(42)
+
+def test_window_max():
+    results = {{}}
+
+    # Test case 1: Simple increasing sequence, k=2
+    x1 = torch.tensor([1, 2, 3, 4, 5], dtype=torch.float32, device='cuda')
+    k1 = 2
+    results["test_case_1"] = window_max(x1, k1)
+
+    # Test case 2: Sequence with negative values, k=3
+    x2 = torch.tensor([-1, -3, 2, 4, 0], dtype=torch.float32, device='cuda')
+    k2 = 3
+    results["test_case_2"] = window_max(x2, k2)
+
+    # Test case 3: All elements equal, k=4
+    x3 = torch.tensor([7, 7, 7, 7, 7], dtype=torch.float32, device='cuda')
+    k3 = 4
+    results["test_case_3"] = window_max(x3, k3)
+
+    # Test case 4: Large random input, k=10
+    x4 = torch.randn(1000, device='cuda')
+    k4 = 10
+    results["test_case_4"] = window_max(x4, k4)
+
+    return results
+
+test_results = test_window_max()
+print(test_results)
+```
+
+If the function is not present, just return the tests as is.
+
+# Tests:
+```python
+{tests}
+```
+"""
+
+class Tests(BaseModel):
+    tests: str = Field(description="The tests to run, with the function to test. Only the code without any ```python or ``` needed, just the code")
+    triton_stderr: str = Field(description="The stderr of the Triton code.")
+    triton_stdout: str = Field(description="The stdout of the Triton code.")
