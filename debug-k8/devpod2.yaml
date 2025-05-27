@@ -42,7 +42,7 @@ spec:
         - name: DOCKER_TLS_CERTDIR
           value: ""
       - name: devpod
-        image: ghcr.io/tcapelle/triton_eval:2005.1
+        image: ghcr.io/tcapelle/triton_eval:2605
         ### Run start with an infinite sleep loop
         securityContext:
           privileged: true
@@ -75,6 +75,16 @@ spec:
           git config --global user.email "tcapelle@pm.me"
           git config --global user.name "Thomas Capelle"
           
+          # Write environment variables to a file that SSH sessions can source
+          cat > /etc/environment-vars << EOF
+          export DOCKER_HOST="$DOCKER_HOST"
+          export WEAVE_PRINT_CALL_LINK="$WEAVE_PRINT_CALL_LINK"
+          export TOKENIZERS_PARALLELISM="$TOKENIZERS_PARALLELISM"
+          export WANDB_API_KEY="$WANDB_API_KEY"
+          export HF_TOKEN="$HF_TOKEN"
+          export OPENAI_API_KEY="$OPENAI_API_KEY"
+          EOF
+          
           mkdir -p /run/sshd
           
           # SSH config
@@ -92,6 +102,10 @@ spec:
           conda activate py3.11
           export PATH="/root/miniconda3/envs/py3.11/bin:$PATH"
           export PYTHONPATH="/app:$PYTHONPATH"
+          
+          # Source the environment variables
+          source /etc/environment-vars
+          
           cd /app/axolotl_dev
           exec /bin/bash "$@"
           EOF
@@ -104,6 +118,7 @@ spec:
           # Also set up .bashrc
           echo 'source /root/miniconda3/etc/profile.d/conda.sh' >> /root/.bashrc
           echo 'conda activate py3.11' >> /root/.bashrc
+          echo 'source /etc/environment-vars' >> /root/.bashrc
           echo 'cd /app/axolotl_dev' >> /root/.bashrc
           
           # Set up authorized keys

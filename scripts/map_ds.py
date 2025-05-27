@@ -39,11 +39,11 @@ async def format_row(row):
     if args.debug:
         print(reasoning)
         print("-"*100)
-    return row
+    return {"reasoning": reasoning}
 
 
 
-weave.init(args.weave_project)
+# weave.init(args.weave_project)
 
 if args.debug:
     ds = ds.select(range(10))
