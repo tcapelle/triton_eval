@@ -1,6 +1,46 @@
 "A collection of prompts for the annotation of the triton dataset"
 
 from pydantic import BaseModel, Field
+import re
+import weave
+
+predibase_system_prompt = """You are a helpful assistant that converts PyTorch code into Triton kernels."""
+
+
+predibase_user_prompt = """Convert this PyTorch module implementation into an equivalent Triton kernel:
+
+<torch_code>
+{pt_code}
+</torch_code>
+
+The Triton kernel should:
+1. Import torch, triton, and triton.language as tl and other necessary modules
+2. Use @triton.jit decorator on the kernel implementation (not the entrypoint function)
+3. Have proper grid and block sizes
+4. Use a mask in the load/store operations
+5. Use typed constants (tl.constexpr)
+6. Handle tensor dimensions correctly
+7. Return output matching PyTorch's implementation
+8. Do not include any test code in your response, only the Triton kernel implementation and entrypoint function
+
+The entrypoint function must be named: {entrypoint}
+The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
+
+No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
+
+The final generated code in the response must start with <triton_code> and end with </triton_code> tags.
+"""
+
+@weave.op
+def predibase_extract_code(code: str) -> str:
+    pattern = r"<triton_code>(.*?)</triton_code>"
+    matches = re.findall(pattern, code, re.DOTALL)
+    if matches:
+        return matches[-1].strip()  # Get the last match
+    else:
+        return ""
+
+#########################################################
 
 class KernelInfo(BaseModel):
     description: str = Field(description="A concise description of the triton code")
