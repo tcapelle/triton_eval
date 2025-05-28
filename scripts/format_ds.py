@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datasets import load_dataset, Dataset, load_from_disk
+from datasets import load_dataset, load_from_disk
 import simple_parsing as sp
 
 from prompts import eval_system_prompt, eval_user_prompt
@@ -40,11 +40,9 @@ def format_example(example):
         messages.append({"role": "assistant", "content": output})
 
 
-    # Format the prompt with the preprocessed code
     return {
-        "prompt": messages,
+        "messages": messages,
         "entrypoint": entrypoint,
-        "tests": example["tests_code"],
     }
 
 if not args.debug:
