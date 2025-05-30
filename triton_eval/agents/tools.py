@@ -82,8 +82,8 @@ def run_python_file(file_path: str, env: dict[str, str] = None, timeout: int = 6
 
     Returns:
         A dictionary containing:
-        - 'status_code': The exit code of the script (0 for success).
-        - 'output': The standard output (stdout) if successful,
+        - 'returncode': The exit code of the script (0 for success).
+        - 'stdout': The standard output (stdout) if successful,
                     or standard error (stderr) if an error occurred.
     """
     # Create a copy of the current environment and update it with provided env vars
@@ -98,8 +98,8 @@ def run_python_file(file_path: str, env: dict[str, str] = None, timeout: int = 6
         timeout=timeout
     )
     if result.returncode != 0:
-        return {"status_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
-    return {"status_code": 0, "stdout": result.stdout, "stderr": result.stderr}
+        return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    return {"returncode": 0, "stdout": result.stdout, "stderr": result.stderr}
 
 @weave.op
 def save_to_file(file_path: str, content: str):
@@ -191,7 +191,7 @@ def run_python_in_process(code: str):
 
     Returns:
         A dictionary containing:
-        - 'status_code': 0 for success, 1 for error.
+        - 'returncode': 0 for success, 1 for error.
         - 'stdout': The captured standard output.
         - 'stderr': The captured standard error.
         - 'error': The error message if an exception occurred (optional).
@@ -199,7 +199,7 @@ def run_python_in_process(code: str):
     """
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
-    status_code = 0
+    returncode = 0
     error_message = None
     tb_string = None
 
@@ -225,7 +225,7 @@ def run_python_in_process(code: str):
             spec.loader.exec_module(temp_module)
 
     except Exception as e:
-        status_code = 1
+        returncode = 1
         error_message = str(e)
         tb_string = traceback.format_exc()
     finally:
@@ -241,7 +241,7 @@ def run_python_in_process(code: str):
     stderr_val = stderr_capture.getvalue()
 
     result = {
-        "status_code": status_code,
+        "returncode": returncode,
         "stdout": stdout_val,
         "stderr": stderr_val,
     }
