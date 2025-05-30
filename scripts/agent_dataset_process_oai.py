@@ -1,19 +1,24 @@
 import asyncio
-import random
+from dataclasses import dataclass, field
 from pathlib import Path
-import openai
-import weave
-from dataclasses import dataclass
-from rich.console import Console
-from datasets import load_dataset, load_from_disk, Dataset
-from pydantic import BaseModel, Field
-import simple_parsing as sp
+import random
+from typing import Any
 
-from agents import Agent, Runner, function_tool
+from datasets import Dataset, load_dataset, load_from_disk
+from pydantic import BaseModel, Field
+from rich.console import Console
+import simple_parsing as sp
+import weave
+import openai
+
+from agents import Agent, Runner, RunContextWrapper, function_tool, RunHooks
 
 from triton_eval.agents.tools import run_python_code_on_gpu
+from triton_eval.utils import compare_outputs
 
 console = Console()
+
+client = openai.AsyncOpenAI()
 
 @dataclass
 class Args:
@@ -23,10 +28,9 @@ class Args:
     weave_project: str = "grpo-cuda/dataset_agent"
     push: bool = False
     num_proc: int = 10
+    max_turns: int = 10
 
 args = sp.parse(Args)
-
-client = openai.OpenAI()
 
 def load_ds(dataset_name):
     if "/" in dataset_name:
@@ -36,7 +40,16 @@ def load_ds(dataset_name):
 
 console.rule(f"[bold blue]Loading dataset: {args.input_dataset}[/bold blue]")
 
-input_ds = load_ds(args.input_dataset)
+# input_ds = load_ds(args.input_dataset)
+input_ds = [
+    {"entrypoint": "softmax", "description": "Computes the softmax of a tensor. Interesting for Triton due to its common use in neural networks and potential for fused operations (e.g., with log or scaling) to improve memory bandwidth and reduce kernel launches."},
+    {"entrypoint": "layer_norm", "description": "Applies Layer Normalization over a mini-batch of inputs. This is a good candidate for Triton as it involves multiple element-wise operations (mean, variance, normalization) and reductions that can be fused into a single kernel, significantly improving performance by reducing memory I/O and kernel launch overhead."},
+    {"entrypoint": "fused_attention", "description": "Implements a fused attention mechanism, such as scaled dot-product attention. This is highly interesting for Triton as it combines multiple computationally intensive operations (matrix multiplications, softmax, dropout, masking) that benefit greatly from kernel fusion, optimized memory access patterns, and tiling strategies to maximize GPU utilization."},
+    {"entrypoint": "silu_and_mul", "description": "Computes SiLU (Sigmoid Linear Unit) activation (x * sigmoid(x)) and then multiplies the result with another tensor (gate). This pattern, often found in models like LLaMA (SwiGLU), is interesting for Triton because fusing these element-wise operations (sigmoid, two multiplications) can reduce memory bandwidth usage and kernel launch overhead."},
+    {"entrypoint": "rope_embedding", "description": "Applies Rotary Position Embedding (RoPE) to input tensors, a common technique in modern transformers. This is interesting for Triton as it involves complex-number-like manipulations, trigonometric functions, and specific slicing/reshaping operations that can be efficiently implemented in a custom kernel to optimize data movement and computation on the GPU."},
+    {"entrypoint": "conv1d_relu", "description": "Performs a 1D convolution followed by a ReLU activation. Fusing these two operations in Triton is beneficial as it avoids writing the intermediate convolution output to global memory and then reading it back for the ReLU, thus saving memory bandwidth and reducing latency."},
+    {"entrypoint": "group_norm", "description": "Applies Group Normalization over a mini-batch of inputs. Similar to LayerNorm, but with grouping, it involves reductions and element-wise ops. Triton can optimize this by fusing these steps and handling the group-wise calculations efficiently, which can be complex for generic library implementations to optimize perfectly."}
+]
 
 console.print("[bold blue]Input dataset[/bold blue]")
 console.print(input_ds)
@@ -45,46 +58,156 @@ console.rule("[bold blue]Fixing code with Agent[/bold blue]")
 
 weave.init(args.weave_project)
 
+############################################
+
+class FunctionNameAndDescription(BaseModel):
+    function_name: str = Field(description="The name of the Pytorch function")
+    function_description: str = Field(description="The description of what the Pytorch function does and why it's interesting to convert to Triton")
+
+creativity_system_prompt = """You are an expert in Pytorch and Triton. You are given a dataset of Pytorch functions and their descriptions.
+You are tasked with generating a new function that is not in the dataset.
+You must generate the function name and a short description of what the function does and why it's interesting to convert to Triton.
+
+Some examples of functions that are interesting to convert to Triton:
+- fused_matmul_add: a fused operation that combines matrix multiplication and addition
+- conv_transpose2d: a transposed convolution operation
+- transpose_2d: a 2D transpose operation
+- matmul_relu_add: a fused operation that combines matrix multiplication, ReLU, and addition
+- one_dimensional_attention: a 1D attention operation
+
+Be creative and make our dataset diverse and rich.
+"""
+
+creativity_user_prompt = """
+Current Dataset:
+{dataset}
+
+Generate a new function that is not in the dataset.
+"""
+
+
+def dump_ds(ds):
+    return "\n".join([f"{row['entrypoint']}: {row['description']}" for row in ds])
+
+async def generate_function_name_and_description(input_ds):
+    current_ds_rows = dump_ds(input_ds)
+    messages = [
+        {"role": "system", "content": creativity_system_prompt},
+        {"role": "user", "content": creativity_user_prompt.format(dataset=current_ds_rows)}
+    ]
+    response = await client.responses.parse(
+        model="gpt-4.1",
+        input=messages,
+        text_format=FunctionNameAndDescription,
+    )
+    return response.output_parsed
+
+############################################
+
+class ExecutionOutput(BaseModel):
+    returncode: int = Field(default=-1, description="The return code of the execution")
+    stdout: str = Field(default="", description="The standard output of the execution")
+    stderr: str = Field(default="", description="The standard error of the execution")
+
+@dataclass
+class CodeExecutionContext:
+    """Context to store execution outputs locally without sending to LLM"""
+    outputs: ExecutionOutput = field(default_factory=ExecutionOutput)
+    
+    def store_result(self, result: ExecutionOutput) -> None:
+        """Store execution result"""
+        self.outputs = result
+    
+    def get_execution_summary(self) -> dict[str, Any]:
+        """Get a summary of execution for LLM"""
+        if not self.outputs:
+            return {"runs": False, "error_summary": "No execution attempted"}
+        
+        return {
+            "runs": self.outputs.returncode == 0,
+            "has_output": bool(self.outputs.stdout.strip()),
+            "has_error": bool(self.outputs.stderr.strip()),
+            "error_summary": self.outputs.stderr[:200] + "..." if len(self.outputs.stderr) > 200 else self.outputs.stderr
+        }
+    
+@dataclass
+class T2TContext:
+    pt_ctx: CodeExecutionContext = field(default_factory=CodeExecutionContext)
+    triton_ctx: CodeExecutionContext = field(default_factory=CodeExecutionContext)
+    tests: str = Field(description="The tests to run")
+    match_results: bool = False
+
+@function_tool
+async def run_code_and_tests(wrapper: RunContextWrapper[CodeExecutionContext], code: str, tests: str) -> str:
+    """Run the code and tests, store results in context.
+    Args:
+        code: The code to run.
+        tests: The tests to run.
+    Returns:
+        A summary of the execution for the LLM.
+    """
+    code_and_tests = f"{code}\n\n############import torch\ntorch.set_printoptions(threshold=int(1e9))\n\n{tests}"
+    result = run_python_code_on_gpu(code_and_tests)
+    wrapper.context.store_result(ExecutionOutput.model_validate(result))
+    
+    summary = wrapper.context.get_execution_summary()
+    if summary["runs"]:
+        return f"Code executed successfully. Has output: {summary['has_output']}"
+    else:
+        return f"Code failed. Error: {summary['error_summary']}"
+
+@function_tool
+async def run_triton_code_and_compare(wrapper: RunContextWrapper[T2TContext], triton_code: str) -> str:
+    """Run the triton code and compare the output to the expected output.
+    Args:
+        triton_code: The triton code to run.
+    Returns:
+        A message indicating which test cases pass/fail.
+    """
+    triton_code_and_tests = f"{triton_code}\n\n############import torch\ntorch.set_printoptions(threshold=int(1e9))\n\n{wrapper.context.tests}"
+    result = run_python_code_on_gpu(triton_code_and_tests)
+    triton_output = wrapper.context.outputs.stdout
+    wrapper.context.triton_ctx.store_result(ExecutionOutput.model_validate(result))
+    pt_sdout = wrapper.context.pt_ctx.outputs.expected_stdout
+    
+    summary = wrapper.context.triton_ctx.get_execution_summary()
+    if summary["runs"]:
+        match_results = compare_outputs(pt_sdout, triton_output)
+        for name, status, msg, _ in match_results:
+            return "Test Results:\n" + "\n".join([f"{name}: {status} ({msg})"])
+    else:
+        return f"Code failed. Error: {summary['error_summary']}"
 
 ### First Agent: Generate PyTorch/Triton pairs
+triton_cookbook = Path("./data/triton_cookbook.md").read_text()
 
-def join_past_rows(ds, num_past_rows):
-    "sample `rows_to_sample` randomly from ds"
-    rows = random.sample(ds.to_list(), num_past_rows)
-    formatted_rows = "\n".join([f"====== \n{row['pt_code']}\n---\n{row['triton_code']}\n---\n{row['tests']}\n======\n" for i, row in enumerate(rows)])
-    return formatted_rows
-
-triton_cookbook = Path("/Users/tcapelle/work/triton_eval/scripts/data/triton_cookbook.md").read_text()
-
-class RunnerOutput(BaseModel):
-    code_runs: bool = Field(description="Whether the code runs or not.")
-    stdout: str = Field(default="", description="The stdout of the code.")
-    stderr: str = Field(default="", description="The stderr of the code.")
-
-class PyTorchTritonRow(BaseModel):
-    conversion_reasoning: str = Field(description="The reasoning step by step on how the conversion to triton should be done for this specific function")
+class PytorchOutput(BaseModel):
     pt_code: str = Field(description="The PyTorch code for the function")
-    triton_code: str = Field(description="The Triton code for the function")
     pt_entrypoint: str = Field(description="The entrypoint of the function in Pytorch")
-    triton_entrypoint: str = Field(description="The entrypoint of the function in Triton")
     tests: str = Field(description="The tests for the function")
-    pt_output: RunnerOutput = Field(description="The output of the PyTorch code.")
-    triton_output: RunnerOutput = Field(description="The output of the Triton code.")
+    pt_runs: bool = Field(description="Whether the pytorch code runs or not.")
+    pt_has_output: bool = Field(description="Whether the pytorch code produced output.")
+    pt_error_summary: str = Field(default="", description="Brief summary of any pytorch errors.")
 
-generation_system_prompt = f"""We are generating a PyTorch/Triton pairs dataset. We want functions that have exactly the same funcionalities.
+class TritonOutput(BaseModel):
+    conversion_reasoning: str = Field(description="The reasoning step by step on how the conversion to triton should be done for this specific function")
+    triton_code: str = Field(description="The Triton code for the function, no tests are needed, just the triton code")
+    triton_entrypoint: str = Field(description="The entrypoint of the function in Triton")
+    triton_runs: bool = Field(description="Whether the triton code runs or not.")
+    triton_has_output: bool = Field(description="Whether the triton code produced output.")
+    triton_error_summary: str = Field(default="", description="Brief summary of any triton errors.")
+    triton_is_correct: bool = Field(description="Whether the triton code is correct or not.")
 
-Your task is to generate a new row for our dataset. Focus on clarity and simplicity, Triton can be very complex, the idea is generating pairs that are easy to understand and that can be used to learn Triton.
+pytorch_generation_system_prompt = f"""We are generating a PyTorch/Triton pairs dataset. We want functions that have exactly the same functionalities.
 
-Here it's a best practice on writing Triton kernels: {triton_cookbook}
+Your task is to generate a new row for our dataset. Focus on clarity and simplicity, Triton can be very complex, the idea is generating pairs that are easy to understand and that can be used to learn Triton. With each new sample add more complexity to the code.
 
-Return the reasoning step by step on how the conversion to triton should be done for this specific function.
-
-Make also a set of tests that validate the functionality of the function.
+You have to generate the pytorch code and tests for a given function.
 
 ## Regarding the tests:
 
 - Ensure that all branch tests are in a single function starting with
-“test_”, with no parameters.
+"test_", with no parameters.
 - Particular attention should be paid to the fact that tensor parameters are of GPU type.
 - Try to limit the number of branches to no more than 4. 
 - In branch tests, avoid modifying parameters that are later in the argument list with default values (especially if
@@ -101,9 +224,8 @@ representing the test case number.
 - Make sure the signature of the test function is `test_<function_name>()`
 - Use `torch.manual_seed(42)` to seed the random number generator.
 
-You have access to tools to run code, make sure to use it to validate your tests run. Make sure the triton and pytorch code produce the same output.
 
-A perfect example of the testswould look like this:
+A perfect example of the pytorch function and tests would look like this:
 
 Pytorch code:
 ```python
@@ -160,43 +282,152 @@ def test_add():
 test_results = test_add()
 print(test_results)
 ```
+
+You must use the run_code_and_tests tool to run your code and tests. You should return a working pytorch implementation of the function with the tests.
 """
 
-generation_user_prompt = """Our dataset is comprised now of the following rows:
-{formatted_rows}
-
-Be creative and think about dataset diversity, let's not make every row of the dataset row identical. Don't just re-implement top level torch operations like torch.sum, torch.floor, etc.. those have Triton primitives already.
-Generate a new sample pair of PyTorch and Triton code that we can add to the dataset.
-
-Keep the format of naming your triton entrypoint the same as the PyTorch entrypoint. This will enable us to use the same entrypoint for both PyTorch and Triton.
+pytorch_generation_user_prompt = """
+Generate the pytorch code and tests for the function: {function_name}
+description: {function_description}
 """
 
-boot_agent = Agent(
-    name="BoostraperAgent", 
+triton_generation_system_prompt = """
+Your task is to convert the pytorch code into a Triton kernel.
+
+Here it's a best practice on writing Triton kernels: {triton_cookbook}
+
+Also return reasoning step by step on how the conversion to triton should be done for this specific function. Apply the best practices from the cookbook.
+
+## Example conversion from pytorch to triton
+
+Pytorch code input: 
+```python
+def relu(x: torch.Tensor) -> torch.Tensor:
+    # x: FloatTensor[N, M]
+    return torch.maximum(x, torch.zeros_like(x))
+```
+
+Expected Output:
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def triton_relu_kernel(X, Y, stride_row, stride_col, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < stride_row * stride_col
+    x_vals = tl.load(X + offs, mask=mask, other=0.0)
+    y_vals = tl.maximum(x_vals, 0.0)
+    tl.store(Y + offs, y_vals, mask=mask)
+
+def relu(x, BLOCK_SIZE: int = 1024):
+    n, m = x.shape
+    y = torch.empty_like(x)
+    grid = ((n * m + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    triton_relu_kernel[grid](
+        x.data_ptr(), y.data_ptr(),
+        m, 1,
+        BLOCK_SIZE
+    )
+    return y
+```
+"""
+
+triton_generation_user_prompt = """Convert the following pytorch code into a Triton kernel.
+
+Pytorch code:
+```python
+{pt_code}
+```
+
+The entrypoint function must be named: {entrypoint}
+The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
+
+No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
+"""
+
+pt_agent = Agent[CodeExecutionContext](
+    name="PyTorchAgent", 
     model="o4-mini",
-    instructions=generation_system_prompt,
-    tools=[function_tool(run_python_code_on_gpu),],
-    output_type=PyTorchTritonRow)
+    instructions=pytorch_generation_system_prompt,
+    tools=[run_code_and_tests],
+    output_type=PytorchOutput)
+
+triton_agent = Agent[CodeExecutionContext](
+    name="TritonAgent", 
+    model="o4-mini",
+    instructions=triton_generation_system_prompt,
+    tools=[run_triton_code_and_compare],
+    output_type=TritonOutput)
 
 console.rule("[bold blue]Processing dataset[/bold blue]")
 
+def unpack_row(row: dict):
+    "unpack all nested dicts into a flat dict"
+    unpacked_data = {}
+    for key, value in row.items():
+        if isinstance(value, dict):
+            unpacked_data.update(unpack_row(value))
+        else:
+            unpacked_data[key] = value
+    return unpacked_data
 
 @weave.op
-async def main(frows):
-    pt_triton_row = await Runner.run(boot_agent, generation_user_prompt.format(formatted_rows=frows))
-    
-    return pt_triton_row.final_output.model_dump()
+async def generate_row(max_turns: int):
+    pt_execution_context = CodeExecutionContext()    
+    try:    
+        function_name, function_description = await generate_function_name_and_description(input_ds)
 
-if args.debug:
-    input_ds = input_ds.select(range(10))
+        pt_result = await Runner.run(
+            starting_agent=pt_agent, 
+            input=pytorch_generation_user_prompt.format(
+                function_name=function_name, 
+                function_description=function_description),
+            context=pt_execution_context,
+            max_turns=max_turns
+        )
 
-frows = join_past_rows(input_ds, 10)
+        triton_execution_context = T2TContext(
+            pt_ctx=pt_execution_context,
+            tests=pt_result.final_output.tests
+        )
 
-out = asyncio.run(main(frows))
-print(out)
+        triton_result = await Runner.run(
+            starting_agent=triton_agent, 
+            input=triton_generation_user_prompt.format(
+                pt_code=pt_result.final_output.pt_code,
+                entrypoint=pt_result.final_output.pt_entrypoint),
+            context=triton_execution_context,
+            max_turns=max_turns
+        )
+        
+        # Get the basic row data from the agent output
+        row_data = unpack_row(pt_result.final_output.model_dump())
+        
+        print (row_data)
+        # return final_row
+    except Exception as e:
+        console.print(f"[bold red]Error: {e}[/bold red]")
+        return None
 
-# pds = Dataset.from_list(pds_list)
-# pds.save_to_disk(args.output_dataset.replace("/", "_"))
+@weave.op
+async def generate_rows(n_rows: int, max_turns: int):
+    tasks = []
+    for _ in range(n_rows):
+        tasks.append(generate_row(max_turns=max_turns))
+    pds_list = await asyncio.gather(*tasks)
+    pds_list = [pds for pds in pds_list if pds is not None]
+    return pds_list
 
-# if args.push:
-#     pds.push_to_hub(args.output_dataset)
+
+new_rows = asyncio.run(generate_rows(n_rows=3, max_turns=args.max_turns))
+
+# console.print(new_rows[-1])
+
+pds = Dataset.from_list(new_rows)
+pds.save_to_disk(args.output_dataset.replace("/", "_"))
+
+if args.push:
+    input_ds.push_to_hub(args.output_dataset)
