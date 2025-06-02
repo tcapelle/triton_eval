@@ -1,8 +1,8 @@
 import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-import random
-from typing import Any
+from typing import Any, Optional
+from enum import Enum
 
 from datasets import Dataset, load_dataset, load_from_disk
 from pydantic import BaseModel, Field
@@ -11,7 +11,7 @@ import simple_parsing as sp
 import weave
 import openai
 
-from agents import Agent, Runner, RunContextWrapper, function_tool, RunHooks
+from agents import Agent, Runner, RunContextWrapper, function_tool
 
 from triton_eval.agents.tools import run_python_code_on_gpu
 from triton_eval.utils import compare_outputs
@@ -32,24 +32,17 @@ class Args:
 
 args = sp.parse(Args)
 
-def load_ds(dataset_name):
-    if "/" in dataset_name:
+def load_ds(dataset_name, init=True):
+    if init:
+        return load_dataset("json", data_files="./data/simple_samples.jsonl")["train"]
+    elif "/" in dataset_name:
         return load_dataset(dataset_name)["train"]
     else:
         return load_from_disk(dataset_name)["train"]
 
 console.rule(f"[bold blue]Loading dataset: {args.input_dataset}[/bold blue]")
 
-# input_ds = load_ds(args.input_dataset)
-input_ds = [
-    {"entrypoint": "softmax", "description": "Computes the softmax of a tensor. Interesting for Triton due to its common use in neural networks and potential for fused operations (e.g., with log or scaling) to improve memory bandwidth and reduce kernel launches."},
-    {"entrypoint": "layer_norm", "description": "Applies Layer Normalization over a mini-batch of inputs. This is a good candidate for Triton as it involves multiple element-wise operations (mean, variance, normalization) and reductions that can be fused into a single kernel, significantly improving performance by reducing memory I/O and kernel launch overhead."},
-    {"entrypoint": "fused_attention", "description": "Implements a fused attention mechanism, such as scaled dot-product attention. This is highly interesting for Triton as it combines multiple computationally intensive operations (matrix multiplications, softmax, dropout, masking) that benefit greatly from kernel fusion, optimized memory access patterns, and tiling strategies to maximize GPU utilization."},
-    {"entrypoint": "silu_and_mul", "description": "Computes SiLU (Sigmoid Linear Unit) activation (x * sigmoid(x)) and then multiplies the result with another tensor (gate). This pattern, often found in models like LLaMA (SwiGLU), is interesting for Triton because fusing these element-wise operations (sigmoid, two multiplications) can reduce memory bandwidth usage and kernel launch overhead."},
-    {"entrypoint": "rope_embedding", "description": "Applies Rotary Position Embedding (RoPE) to input tensors, a common technique in modern transformers. This is interesting for Triton as it involves complex-number-like manipulations, trigonometric functions, and specific slicing/reshaping operations that can be efficiently implemented in a custom kernel to optimize data movement and computation on the GPU."},
-    {"entrypoint": "conv1d_relu", "description": "Performs a 1D convolution followed by a ReLU activation. Fusing these two operations in Triton is beneficial as it avoids writing the intermediate convolution output to global memory and then reading it back for the ReLU, thus saving memory bandwidth and reducing latency."},
-    {"entrypoint": "group_norm", "description": "Applies Group Normalization over a mini-batch of inputs. Similar to LayerNorm, but with grouping, it involves reductions and element-wise ops. Triton can optimize this by fusing these steps and handling the group-wise calculations efficiently, which can be complex for generic library implementations to optimize perfectly."}
-]
+input_ds = load_ds(args.input_dataset, init=True)
 
 console.print("[bold blue]Input dataset[/bold blue]")
 console.print(input_ds)
@@ -85,7 +78,6 @@ Current Dataset:
 Generate a new function that is not in the dataset.
 """
 
-
 def dump_ds(ds):
     return "\n".join([f"{row['entrypoint']}: {row['description']}" for row in ds])
 
@@ -98,85 +90,140 @@ async def generate_function_name_and_description(input_ds):
     response = await client.responses.parse(
         model="gpt-4.1",
         input=messages,
+        temperature=1.0,
         text_format=FunctionNameAndDescription,
     )
     return response.output_parsed
 
 ############################################
 
-class ExecutionOutput(BaseModel):
-    returncode: int = Field(default=-1, description="The return code of the execution")
-    stdout: str = Field(default="", description="The standard output of the execution")
-    stderr: str = Field(default="", description="The standard error of the execution")
+class ExecutionType(str, Enum):
+    PYTORCH = "pytorch"
+    TRITON = "triton"
 
-@dataclass
-class CodeExecutionContext:
-    """Context to store execution outputs locally without sending to LLM"""
-    outputs: ExecutionOutput = field(default_factory=ExecutionOutput)
+class UnifiedExecutionContext(BaseModel):
+    """Simplified flat context for both PyTorch and Triton execution"""
     
-    def store_result(self, result: ExecutionOutput) -> None:
-        """Store execution result"""
-        self.outputs = result
+    # Function metadata
+    function_name: str = ""
+    function_description: str = ""
     
-    def get_execution_summary(self) -> dict[str, Any]:
-        """Get a summary of execution for LLM"""
-        if not self.outputs:
-            return {"runs": False, "error_summary": "No execution attempted"}
+    # PyTorch execution
+    pt_code: str = ""
+    pt_entrypoint: str = ""
+    pt_tests: str = ""
+    pt_returncode: int = -1
+    pt_stdout: str = ""
+    pt_stderr: str = ""
+    pt_runs: bool = False
+    pt_has_output: bool = False
+    pt_error_summary: str = ""
+    
+    # Triton execution
+    triton_code: str = ""
+    triton_entrypoint: str = ""
+    triton_returncode: int = -1
+    triton_stdout: str = ""
+    triton_stderr: str = ""
+    triton_runs: bool = False
+    triton_has_output: bool = False
+    triton_error_summary: str = ""
+    triton_is_correct: bool = False
+    
+    # Shared
+    tests: str = ""
+    
+    def store_execution_result(self, exec_type: ExecutionType, result: dict):
+        """Store execution result for given type"""
+        prefix = exec_type.value if exec_type == ExecutionType.PYTORCH else "triton"
+        if exec_type == ExecutionType.PYTORCH:
+            prefix = "pt"
+        
+        setattr(self, f"{prefix}_returncode", result.get("returncode", -1))
+        setattr(self, f"{prefix}_stdout", result.get("stdout", ""))
+        setattr(self, f"{prefix}_stderr", result.get("stderr", ""))
+        setattr(self, f"{prefix}_runs", result.get("returncode", -1) == 0)
+        setattr(self, f"{prefix}_has_output", bool(result.get("stdout", "").strip()))
+        setattr(self, f"{prefix}_error_summary", result.get("stderr", ""))
+    
+    def get_execution_summary(self, exec_type: ExecutionType) -> dict:
+        """Get execution summary for LLM"""
+        prefix = "pt" if exec_type == ExecutionType.PYTORCH else "triton"
+        
+        runs = getattr(self, f"{prefix}_runs")
+        has_output = getattr(self, f"{prefix}_has_output")
+        stderr = getattr(self, f"{prefix}_stderr")
         
         return {
-            "runs": self.outputs.returncode == 0,
-            "has_output": bool(self.outputs.stdout.strip()),
-            "has_error": bool(self.outputs.stderr.strip()),
-            "error_summary": self.outputs.stderr[:200] + "..." if len(self.outputs.stderr) > 200 else self.outputs.stderr
+            "runs": runs,
+            "has_output": has_output,
+            "has_error": bool(stderr.strip()),
+            "error_summary": stderr,
         }
     
-@dataclass
-class T2TContext:
-    pt_ctx: CodeExecutionContext = field(default_factory=CodeExecutionContext)
-    triton_ctx: CodeExecutionContext = field(default_factory=CodeExecutionContext)
-    tests: str = Field(description="The tests to run")
-    match_results: bool = False
+    def to_flat_dict(self) -> dict:
+        """Convert to flat dictionary - no more unpack_row needed"""
+        return self.model_dump()
 
 @function_tool
-async def run_code_and_tests(wrapper: RunContextWrapper[CodeExecutionContext], code: str, tests: str) -> str:
-    """Run the code and tests, store results in context.
-    Args:
-        code: The code to run.
-        tests: The tests to run.
-    Returns:
-        A summary of the execution for the LLM.
-    """
-    code_and_tests = f"{code}\n\n############import torch\ntorch.set_printoptions(threshold=int(1e9))\n\n{tests}"
-    result = run_python_code_on_gpu(code_and_tests)
-    wrapper.context.store_result(ExecutionOutput.model_validate(result))
+async def run_code(
+    wrapper: RunContextWrapper[UnifiedExecutionContext], 
+    code: str, 
+    exec_type: ExecutionType,
+    tests: Optional[str] = None
+) -> str:
+    """Generic tool to run code and store results in context"""
     
-    summary = wrapper.context.get_execution_summary()
+    if tests:
+        full_code = f"{code}\n\n############\nimport torch\ntorch.set_printoptions(threshold=int(1e9))\n\n{tests}"
+    else:
+        full_code = code
+    
+    result = run_python_code_on_gpu(full_code)
+    wrapper.context.store_execution_result(exec_type, result)
+    
+    summary = wrapper.context.get_execution_summary(exec_type)
+    
     if summary["runs"]:
         return f"Code executed successfully. Has output: {summary['has_output']}"
     else:
-        return f"Code failed. Error: {summary['error_summary']}"
+        return f"""Code failed with error: {summary['error_summary']}.
+        Reflect on your previous attempts at fixing the error, then try fixing the error."""
 
 @function_tool
-async def run_triton_code_and_compare(wrapper: RunContextWrapper[T2TContext], triton_code: str) -> str:
-    """Run the triton code and compare the output to the expected output.
-    Args:
-        triton_code: The triton code to run.
-    Returns:
-        A message indicating which test cases pass/fail.
-    """
-    triton_code_and_tests = f"{triton_code}\n\n############import torch\ntorch.set_printoptions(threshold=int(1e9))\n\n{wrapper.context.tests}"
-    result = run_python_code_on_gpu(triton_code_and_tests)
-    triton_output = wrapper.context.outputs.stdout
-    wrapper.context.triton_ctx.store_result(ExecutionOutput.model_validate(result))
-    pt_sdout = wrapper.context.pt_ctx.outputs.expected_stdout
+async def run_pytorch_code_and_tests(
+    wrapper: RunContextWrapper[UnifiedExecutionContext], 
+    code: str, 
+    tests: str
+) -> str:
+    """Run PyTorch code and tests"""
+    return await run_code(wrapper, code, ExecutionType.PYTORCH, tests)
+
+@function_tool  
+async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[UnifiedExecutionContext]) -> str:
+    """Compare PyTorch and Triton outputs"""
+    ctx = wrapper.context
     
-    summary = wrapper.context.triton_ctx.get_execution_summary()
-    if summary["runs"]:
-        match_results = compare_outputs(pt_sdout, triton_output)
-        for name, status, msg, _ in match_results:
-            return "Test Results:\n" + "\n".join([f"{name}: {status} ({msg})"])
-    else:
-        return f"Code failed. Error: {summary['error_summary']}"
+    if not ctx.pt_runs or not ctx.triton_runs:
+        return "Cannot compare - one or both implementations failed to run"
+    
+    match_results = compare_outputs(ctx.pt_stdout, ctx.triton_stdout)
+    ctx.triton_is_correct = all(status == "PASS" for _, status, _, _ in match_results)
+    
+    results_str = "\n".join([f"{name}: {status} ({msg})" for name, status, msg, _ in match_results])
+    return f"Test Results:\n{results_str}"
+
+@function_tool
+async def run_triton_code_and_compare(
+    wrapper: RunContextWrapper[UnifiedExecutionContext], 
+    triton_code: str
+) -> str:
+    """Run Triton code and compare with PyTorch output"""
+    # First run the triton code
+    await run_code(wrapper, triton_code, ExecutionType.TRITON, wrapper.context.tests)
+    
+    # Then compare outputs
+    return await compare_pytorch_triton_outputs(wrapper)
 
 ### First Agent: Generate PyTorch/Triton pairs
 triton_cookbook = Path("./data/triton_cookbook.md").read_text()
@@ -190,13 +237,13 @@ class PytorchOutput(BaseModel):
     pt_error_summary: str = Field(default="", description="Brief summary of any pytorch errors.")
 
 class TritonOutput(BaseModel):
-    conversion_reasoning: str = Field(description="The reasoning step by step on how the conversion to triton should be done for this specific function")
-    triton_code: str = Field(description="The Triton code for the function, no tests are needed, just the triton code")
-    triton_entrypoint: str = Field(description="The entrypoint of the function in Triton")
-    triton_runs: bool = Field(description="Whether the triton code runs or not.")
-    triton_has_output: bool = Field(description="Whether the triton code produced output.")
+    conversion_reasoning: str = Field(default="", description="The reasoning step by step on how the conversion to triton should be done for this specific function")
+    triton_code: str = Field(default="", description="The Triton code for the function, no tests are needed, just the triton code")
+    triton_entrypoint: str = Field(default="", description="The entrypoint of the function in Triton")
+    triton_runs: bool = Field(default=False, description="Whether the triton code runs or not.")
+    triton_has_output: bool = Field(default=False, description="Whether the triton code produced output.")
     triton_error_summary: str = Field(default="", description="Brief summary of any triton errors.")
-    triton_is_correct: bool = Field(description="Whether the triton code is correct or not.")
+    triton_is_correct: bool = Field(default=False, description="Whether the triton code is correct or not.")
 
 pytorch_generation_system_prompt = f"""We are generating a PyTorch/Triton pairs dataset. We want functions that have exactly the same functionalities.
 
@@ -283,7 +330,7 @@ test_results = test_add()
 print(test_results)
 ```
 
-You must use the run_code_and_tests tool to run your code and tests. You should return a working pytorch implementation of the function with the tests.
+You must use the run_pytorch_code_and_tests tool to run your code and tests. You should return a working pytorch implementation of the function with the tests.
 """
 
 pytorch_generation_user_prompt = """
@@ -291,10 +338,11 @@ Generate the pytorch code and tests for the function: {function_name}
 description: {function_description}
 """
 
-triton_generation_system_prompt = """
-Your task is to convert the pytorch code into a Triton kernel.
+triton_generation_system_prompt = f"""
+Your task is to convert the pytorch code into a Triton kernel, the code should be runnable and the output should be the same as the pytorch code. Use the `run_triton_code_and_compare` tool to check if the code is correct.
 
-Here it's a best practice on writing Triton kernels: {triton_cookbook}
+Here it's a best practice on writing Triton kernels:
+{triton_cookbook}
 
 Also return reasoning step by step on how the conversion to triton should be done for this specific function. Apply the best practices from the cookbook.
 
@@ -308,31 +356,44 @@ def relu(x: torch.Tensor) -> torch.Tensor:
 ```
 
 Expected Output:
-
 ```python
+import torch
 import triton
 import triton.language as tl
 
 @triton.jit
-def triton_relu_kernel(X, Y, stride_row, stride_col, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < stride_row * stride_col
-    x_vals = tl.load(X + offs, mask=mask, other=0.0)
+def triton_relu_kernel(
+    X_ptr,         # pointer to the input float buffer
+    Y_ptr,         # pointer to the output float buffer
+    numel,         # total number of elements = n * m
+    BLOCK_SIZE: tl.constexpr  # compile‐time block size
+):
+    pid   = tl.program_id(0)
+    offs  = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask  = offs < numel
+    x_vals = tl.load(X_ptr + offs, mask=mask, other=0.0)
     y_vals = tl.maximum(x_vals, 0.0)
-    tl.store(Y + offs, y_vals, mask=mask)
+    tl.store(Y_ptr + offs, y_vals, mask=mask)
 
-def relu(x, BLOCK_SIZE: int = 1024):
-    n, m = x.shape
-    y = torch.empty_like(x)
-    grid = ((n * m + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+def relu(x: torch.Tensor, BLOCK_SIZE: int = 1024) -> torch.Tensor:
+    n, m   = x.shape
+    numel  = n * m
+    y      = torch.empty_like(x)
+    grid   = ((numel + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     triton_relu_kernel[grid](
-        x.data_ptr(), y.data_ptr(),
-        m, 1,
+        x.data_ptr(), 
+        y.data_ptr(),
+        numel, 
         BLOCK_SIZE
     )
     return y
 ```
+
+Why this version is "good":
+- Single "numel" argument instead of confusing stride_row, stride_col.
+- Mask is offs < numel, which correctly covers all n×m elements.
+- All loads/stores use mask, so partial blocks at the end won't run out of bounds.
+- It's clear that tl.maximum(x_vals, 0.0) implements ReLU.
 """
 
 triton_generation_user_prompt = """Convert the following pytorch code into a Triton kernel.
@@ -346,26 +407,30 @@ The entrypoint function must be named: {entrypoint}
 The Triton kernel implementation (called by the entrypoint) must be named: {entrypoint}_kernel
 
 No computation logic should be done within the entrypoint function. All computation logic should be done within the Triton kernel implementation.
+
+You must use the `run_triton_code_and_compare` tool to check if the code is correct.
 """
 
-pt_agent = Agent[CodeExecutionContext](
+pt_agent = Agent[UnifiedExecutionContext](
     name="PyTorchAgent", 
     model="o4-mini",
     instructions=pytorch_generation_system_prompt,
-    tools=[run_code_and_tests],
-    output_type=PytorchOutput)
+    tools=[run_pytorch_code_and_tests],
+    output_type=PytorchOutput
+)
 
-triton_agent = Agent[CodeExecutionContext](
+triton_agent = Agent[UnifiedExecutionContext](
     name="TritonAgent", 
     model="o4-mini",
     instructions=triton_generation_system_prompt,
     tools=[run_triton_code_and_compare],
-    output_type=TritonOutput)
+    output_type=TritonOutput
+)
 
 console.rule("[bold blue]Processing dataset[/bold blue]")
 
 def unpack_row(row: dict):
-    "unpack all nested dicts into a flat dict"
+    """Unpack all nested dicts into a flat dict"""
     unpacked_data = {}
     for key, value in row.items():
         if isinstance(value, dict):
@@ -376,38 +441,52 @@ def unpack_row(row: dict):
 
 @weave.op
 async def generate_row(max_turns: int):
-    pt_execution_context = CodeExecutionContext()    
-    try:    
-        function_name, function_description = await generate_function_name_and_description(input_ds)
-
+    # Create unified context
+    context = UnifiedExecutionContext()
+    
+    # Generate function description
+    function_name_desc = await generate_function_name_and_description(input_ds)
+    context.function_name = function_name_desc.function_name
+    context.function_description = function_name_desc.function_description
+    
+    try:
+        # Run PyTorch agent
         pt_result = await Runner.run(
-            starting_agent=pt_agent, 
+            starting_agent=pt_agent,
             input=pytorch_generation_user_prompt.format(
-                function_name=function_name, 
-                function_description=function_description),
-            context=pt_execution_context,
+                function_name=context.function_name,
+                function_description=context.function_description
+            ),
+            context=context,
             max_turns=max_turns
         )
-
-        triton_execution_context = T2TContext(
-            pt_ctx=pt_execution_context,
-            tests=pt_result.final_output.tests
-        )
-
+        
+        # Store PyTorch results in context
+        context.pt_code = pt_result.final_output.pt_code
+        context.pt_entrypoint = pt_result.final_output.pt_entrypoint
+        context.tests = pt_result.final_output.tests
+        
+        # Run Triton agent with same context
         triton_result = await Runner.run(
-            starting_agent=triton_agent, 
+            starting_agent=triton_agent,
             input=triton_generation_user_prompt.format(
-                pt_code=pt_result.final_output.pt_code,
-                entrypoint=pt_result.final_output.pt_entrypoint),
-            context=triton_execution_context,
+                pt_code=context.pt_code,
+                entrypoint=context.pt_entrypoint
+            ),
+            context=context,
             max_turns=max_turns
         )
         
-        # Get the basic row data from the agent output
-        row_data = unpack_row(pt_result.final_output.model_dump())
+        # Start with the flat context data
+        row_data = context.to_flat_dict()
         
-        print (row_data)
-        # return final_row
+        # Add final output data (might contain nested dicts)
+        row_data.update(pt_result.final_output.model_dump())
+        row_data.update(triton_result.final_output.model_dump())
+        
+        # Ensure the final result is completely flat
+        return unpack_row(row_data)
+        
     except Exception as e:
         console.print(f"[bold red]Error: {e}[/bold red]")
         return None
@@ -421,10 +500,7 @@ async def generate_rows(n_rows: int, max_turns: int):
     pds_list = [pds for pds in pds_list if pds is not None]
     return pds_list
 
-
 new_rows = asyncio.run(generate_rows(n_rows=3, max_turns=args.max_turns))
-
-# console.print(new_rows[-1])
 
 pds = Dataset.from_list(new_rows)
 pds.save_to_disk(args.output_dataset.replace("/", "_"))

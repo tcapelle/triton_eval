@@ -1,6 +1,6 @@
-# Triton Kernel Conversion Recipe
+# Triton Kernel Conversion Recipe (v2)
 
-A concise, actionable checklist and code snippets to guide you through writing high‑performance Triton kernels. Focuses on kernel‑authoring steps themselves, without extraneous benchmarking details.
+A concise, actionable checklist and code snippets to guide you through writing high-performance Triton kernels. Focuses on kernel-authoring steps themselves, without extraneous benchmarking details.
 
 ---
 
@@ -22,12 +22,12 @@ def kernel_1d(x_ptr, N, BLOCK_SIZE: tl.constexpr):
     tl.store(x_ptr + offs, data, mask=mask)
 ```
 
-* Use `tl.program_id(axis)` and `tl.arange` for per‑program indexing.
-* Mark tile dimensions as `constexpr` for compile‑time unrolling and optimization.
+* Use `tl.program_id(axis)` and `tl.arange` for per-program indexing.
+* Mark tile dimensions as `constexpr` for compile-time unrolling and optimization.
 
 ---
 
-## 2. Multi‑Dimensional Grids (2D/3D)
+## 2. Multi-Dimensional Grids (2D/3D)
 
 **Goal**: Map 2D/3D problem domains to Triton grids.
 
@@ -55,7 +55,7 @@ def kernel_2d(A_ptr, M, N, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
 
 ## 3. Safety with Masks
 
-**Goal**: Prevent out‑of‑bounds memory accesses on partial tiles.
+**Goal**: Prevent out-of-bounds memory accesses on partial tiles.
 
 ```python
 offs = start + tl.arange(0, BLOCK)
@@ -71,10 +71,10 @@ tl.store(y_ptr + offs, result, mask=mask)
 
 ## 4. Vectorization & Memory Coalescing
 
-**Goal**: Optimize memory bandwidth via unit‑stride loads and shared‑memory reuse.
+**Goal**: Optimize memory bandwidth via unit-stride loads and shared-memory reuse.
 
 ```python
-# Use make_block_ptr for non‑contiguous strides:
+# Use make_block_ptr for non-contiguous strides:
 block_ptr = tl.make_block_ptr(
     base_ptr=x_ptr,
     shape=(BLOCK_M, BLOCK_N),
@@ -85,13 +85,13 @@ block_ptr = tl.make_block_ptr(
 A = tl.load(block_ptr, mask=mask)
 ```
 
-* Aim for unit‑stride (contiguous) accesses whenever possible.
+* Aim for unit-stride (contiguous) accesses whenever possible.
 * Use `tl.cdiv(n, BLOCK)` to compute tile counts.
-* On Ampere+ GPUs, consider `cp.async` for async shared‑memory prefetch.
+* On Ampere+ GPUs, consider `cp.async` for async shared-memory prefetch.
 
 ---
 
-## 5. Meta‑Parameter Specialization
+## 5. Meta-Parameter Specialization
 
 **Goal**: Expose tunable constants so Triton can compile optimized variants.
 
@@ -113,7 +113,7 @@ def gemm(A, B, C, M, N, K,
 
 ## 6. Autotune Configuration
 
-**Goal**: Define a search space over meta‑parameters and let Triton pick the best.
+**Goal**: Define a search space over meta-parameters and let Triton pick the best.
 
 ```python
 def make_configs():
@@ -141,7 +141,7 @@ def gemm(...):
 
 ---
 
-## 7. On‑Chip Fusion & Mixed Precision
+## 7. On-Chip Fusion & Mixed Precision
 
 **Goal**: Fuse multiple operations in one pass; use higher precision for accumulators.
 
@@ -159,7 +159,7 @@ tl.store(C_ptrs, out, mask=mask_c)
 ```
 
 * Cast only at store; use `FP8` or `FP16` flags via `constexpr`.
-* Fuse bias‑add, activation, reduction in one kernel where possible.
+* Fuse bias-add, activation, reduction in one kernel where possible.
 
 ---
 
@@ -182,7 +182,7 @@ def persistent(..., NUM_SMS: tl.constexpr):
 
 ---
 
-## 9. Two‑Phase Parallel Reductions
+## 9. Two-Phase Parallel Reductions
 
 **Goal**: Efficiently reduce across rows or program instances.
 
@@ -220,7 +220,7 @@ tl.store(FINAL+cols, out, mask=cols\<N)
 
 ## 10. Descriptor API & Stride Handling
 
-**Goal**: Support arbitrary N‑dimensional layouts (e.g. NHWC, NCHWc).
+**Goal**: Support arbitrary N-dimensional layouts (e.g. NHWC, NCHWc).
 
 ```python
 # Host side
@@ -239,28 +239,64 @@ A = tl.load(ptr, offsets=(i,j), mask=...)
 
 ---
 
-## 11. Debugging & Testing
+## 11. Libdevice & External Math Functions
+
+**Goal**: Invoke library math routines (sin, cos, asin, etc.) via `tl.extra.libdevice`.
+
+Triton can call external device functions—wrapped in `tl.extra.libdevice`—to compute transcendental operations. Triton automatically picks the correct double/float variant.
+
+```python
+import torch
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
+
+DEVICE = "cuda"
+
+@triton.jit
+def asin_kernel(
+    x_ptr,
+    y_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid         = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets     = block_start + tl.arange(0, BLOCK_SIZE)
+    mask        = offsets < n_elements
+    x           = tl.load(x_ptr + offsets, mask=mask)
+    x           = libdevice.asin(x)  # compute arc-sine
+    tl.store(y_ptr + offsets, x, mask=mask)
+```
+
+* In `libdevice.py`, functions like `__nv_asin` (double) and `__nv_asinf` (float) are grouped. Triton picks the right one based on input dtype.
+* For full list and semantics, refer to CUDA Libdevice User Guide or HIP device-lib source.
+* Other examples: `libdevice.sin(x)`, `libdevice.exp(x)`, `libdevice.sqrt(x)`.
+
+---
+
+## 12. Debugging & Testing
 
 **Goal**: Verify correctness before performance tuning.
 
 * **Print**: `tl.debug_print(x, y, "msg")` inside kernels.
 * **Barrier**: `tl.debug_barrier()` to synchronize and inspect.
 * **Host Assertions**: compare kernel output against PyTorch reference for small inputs.
-* **Unit Tests**: use `pytest` with edge‑case shapes (odd sizes, N\<BLOCK).
+* **Unit Tests**: use `pytest` with edge-case shapes (odd sizes, N < BLOCK).
 
 ---
 
-## 12. Profiling & Benchmarking
+## 13. Profiling & Benchmarking
 
 **Goal**: Measure performance and identify bottlenecks.
 
 * **Triton Profiler**: `triton.testing.perf_report` or `triton.profiler`.
 * **External Tools**: NVIDIA Nsight Compute for detailed metrics.
-* **Benchmark Protocol**: warm‑up runs, multiple iterations, report GFLOPS/GB/s vs. roofline.
+* **Benchmark Protocol**: warm-up runs, multiple iterations, report GFLOPS/GB/s vs. roofline.
 
 ---
 
-## 13. Device‑Aware Resource Queries & Occupancy
+## 14. Device-Aware Resource Queries & Occupancy
 
 **Goal**: Tune grid, stages, and warps to GPU limits.
 
@@ -279,11 +315,11 @@ REGS    = props['max_num_regs']
                   SMEM // smem_per_stage,
                   REGS // regs_per_program)
   ```
-* Choose `num_stages` and `num_warps` to balance occupancy vs. register/SMM usage.
+* Choose `num_stages` and `num_warps` to balance occupancy vs. register/SMEM usage.
 
 ---
 
-## 14. Dynamic Shapes & Conditional Dispatch
+## 15. Dynamic Shapes & Conditional Dispatch
 
 **Goal**: Handle variable workloads efficiently.
 
@@ -295,13 +331,13 @@ REGS    = props['max_num_regs']
   else:
       kernel_generic[grid](...)
   ```
-* Or write a single kernel with shape‑dependent branches on `constexpr` flags.
+* Or write a single kernel with shape-dependent branches on `constexpr` flags.
 
 ---
 
-## 15. Forward & Backward Separation
+## 16. Forward & Backward Separation
 
-**Goal**: Keep backward kernels focused and low‑pressure.
+**Goal**: Keep backward kernels focused and low-pressure.
 
 ```python
 class MyOp(torch.autograd.Function):
@@ -323,21 +359,23 @@ def backward(ctx, dy):
 
 ---
 
-## Final Checklist & Anti‑Patterns
+## Final Checklist & Anti-Patterns
 
 1. Prototype small tile → add masks → parametrize → autotune.
 2. Verify with unit tests and profiler.
 3. Tune occupancy via device props.
 4. Separate ops and use mixed precision.
+5. Integrate libdevice calls for math functions.
+6. Dispatch dynamically for varied shapes.
 
-**Anti‑Patterns**
+**Anti-Patterns**
 
 * Unmasked OOB accesses
 * Excessive register pressure
 * Unnecessary barriers
-* Hard‑coded grid sizes
+* Hard-coded grid sizes
 * Ignoring device limits
-* Over‑specializing early
+* Over-specializing early
 * Monolithic kernels without modularity
 
-> Keep this recipe as your go‑to reference for authoring Triton kernels. Follow the checklist, start from the small prototype, and use autotuning plus profiling to reach top performance.
+> Keep this recipe as your go-to reference for authoring Triton kernels. Follow the checklist, start from the small prototype, and use autotuning plus profiling to reach top performance.
