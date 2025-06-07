@@ -7,11 +7,13 @@ from enum import Enum
 from datasets import Dataset, load_dataset, load_from_disk
 from pydantic import BaseModel, Field
 from rich.console import Console
+from rich.panel import Panel
 import simple_parsing as sp
 import weave
 import openai
 
 from agents import Agent, Runner, RunContextWrapper, function_tool
+from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
 from triton_eval.agents.tools import run_python_code_on_gpu
 from triton_eval.utils import compare_outputs
@@ -23,33 +25,81 @@ client = openai.AsyncOpenAI()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/boostrap_triton_ran"
-    output_dataset: str = "tcapelle/boostrap_triton_ran"
-    weave_project: str = "grpo-cuda/dataset_agent"
+    input_dataset: str = "tcapelle/boostrap_oai"
+    output_dataset: str = "tcapelle/boostrap_oai"
+    weave_project: str = "grpo-cuda/dataset_agent_oai"
     push: bool = False
     num_proc: int = 10
-    max_turns: int = 10
+    max_turns: int = 20
+    verbose: bool = False
+    init: bool = True
+    data_path: Path = Path("./data")
 
 args = sp.parse(Args)
 
+def console_print(text, verbose_only=args.verbose, **kwargs):
+    """Helper function to handle verbose printing"""
+    if not verbose_only or args.verbose:
+        console.print(text, **kwargs)
+
 def load_ds(dataset_name, init=True):
     if init:
-        return load_dataset("json", data_files="./data/simple_samples.jsonl")["train"]
+        return load_dataset("json", data_files=str(args.data_path / "simple_samples.jsonl"))["train"]
     elif "/" in dataset_name:
         return load_dataset(dataset_name)["train"]
     else:
         return load_from_disk(dataset_name)["train"]
 
-console.rule(f"[bold blue]Loading dataset: {args.input_dataset}[/bold blue]")
+console.print(Panel.fit(f"[bold blue]Loading dataset: {args.input_dataset}[/bold blue]", border_style="blue"))
 
-input_ds = load_ds(args.input_dataset, init=True)
+input_ds = load_ds(args.input_dataset, init=args.init)
 
 console.print("[bold blue]Input dataset[/bold blue]")
 console.print(input_ds)
 
-console.rule("[bold blue]Fixing code with Agent[/bold blue]")
+console.print(Panel.fit("[bold blue]Fixing code with Agent[/bold blue]", border_style="blue"))
 
 weave.init(args.weave_project)
+
+def get_current_cookbook() -> str:
+    """Get the current cookbook content, used to reload after updates"""
+    return (args.data_path / "triton_cookbook.md").read_text()
+
+############################################
+
+# ERROR REFLECTION SYSTEM
+# 
+# This system automatically learns from Triton conversion errors and improves the cookbook:
+# 1. During generation, all errors are collected and stored in collected_errors list
+# 2. After all rows are processed, the ErrorReflectionAgent analyzes ALL errors together
+# 3. It reviews the full cookbook and generates an improved version
+# 4. The updated cookbook incorporates lessons learned from all failures
+# 
+# This creates a holistic improvement system that learns from patterns across all errors.
+#
+# WORKFLOW:
+# - Individual errors → collected_errors list (during generate_row)
+# - Batch analysis → analyze_errors_and_improve_cookbook() (after all rows)
+# - Pattern recognition → ErrorReflectionAgent analyzes all errors together
+# - Cookbook replacement → Full cookbook updated with improvements
+# - Future runs benefit from accumulated knowledge across all errors
+
+############################################
+
+# Global error collection for batch analysis
+collected_errors = []
+
+# Row counter for init mode
+current_row_index = 0
+
+class ErrorContext(BaseModel):
+    function_name: str
+    function_description: str
+    pt_code: str
+    triton_code: str
+    triton_error_summary: str
+    triton_stderr: str
+    conversion_reasoning: str = ""
 
 ############################################
 
@@ -101,7 +151,7 @@ class ExecutionType(str, Enum):
     PYTORCH = "pytorch"
     TRITON = "triton"
 
-class UnifiedExecutionContext(BaseModel):
+class ExecutionContext(BaseModel):
     """Simplified flat context for both PyTorch and Triton execution"""
     
     # Function metadata
@@ -144,7 +194,18 @@ class UnifiedExecutionContext(BaseModel):
         setattr(self, f"{prefix}_stderr", result.get("stderr", ""))
         setattr(self, f"{prefix}_runs", result.get("returncode", -1) == 0)
         setattr(self, f"{prefix}_has_output", bool(result.get("stdout", "").strip()))
-        setattr(self, f"{prefix}_error_summary", result.get("stderr", ""))
+        
+        # Store brief error summary (first few lines) for output agents, not full stderr
+        stderr = result.get("stderr", "")
+        if stderr.strip():
+            # Take first 2 lines or first 200 chars of stderr as brief summary
+            error_lines = stderr.strip().split('\n')[:2]
+            brief_error = '\n'.join(error_lines)
+            if len(brief_error) > 200:
+                brief_error = brief_error[:200] + "..."
+            setattr(self, f"{prefix}_error_summary", brief_error)
+        else:
+            setattr(self, f"{prefix}_error_summary", "")
     
     def get_execution_summary(self, exec_type: ExecutionType) -> dict:
         """Get execution summary for LLM"""
@@ -165,9 +226,9 @@ class UnifiedExecutionContext(BaseModel):
         """Convert to flat dictionary - no more unpack_row needed"""
         return self.model_dump()
 
-@function_tool
+@weave.op
 async def run_code(
-    wrapper: RunContextWrapper[UnifiedExecutionContext], 
+    wrapper: RunContextWrapper[ExecutionContext], 
     code: str, 
     exec_type: ExecutionType,
     tests: Optional[str] = None
@@ -187,20 +248,23 @@ async def run_code(
     if summary["runs"]:
         return f"Code executed successfully. Has output: {summary['has_output']}"
     else:
-        return f"""Code failed with error: {summary['error_summary']}.
+        return f"""Code failed with error:\n{summary['error_summary']}.
         Reflect on your previous attempts at fixing the error, then try fixing the error."""
 
 @function_tool
 async def run_pytorch_code_and_tests(
-    wrapper: RunContextWrapper[UnifiedExecutionContext], 
+    wrapper: RunContextWrapper[ExecutionContext], 
     code: str, 
     tests: str
 ) -> str:
     """Run PyTorch code and tests"""
+    # Store the code and tests in context
+    wrapper.context.pt_code = code
+    wrapper.context.tests = tests
+    
     return await run_code(wrapper, code, ExecutionType.PYTORCH, tests)
 
-@function_tool  
-async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[UnifiedExecutionContext]) -> str:
+async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[ExecutionContext]) -> str:
     """Compare PyTorch and Triton outputs"""
     ctx = wrapper.context
     
@@ -208,44 +272,60 @@ async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[UnifiedExecu
         return "Cannot compare - one or both implementations failed to run"
     
     match_results = compare_outputs(ctx.pt_stdout, ctx.triton_stdout)
-    ctx.triton_is_correct = all(status == "PASS" for _, status, _, _ in match_results)
+    ctx.triton_is_correct = all(status == "PASS" for name, status, msg, _ in match_results)
     
     results_str = "\n".join([f"{name}: {status} ({msg})" for name, status, msg, _ in match_results])
     return f"Test Results:\n{results_str}"
 
 @function_tool
+async def update_cookbook_with_error_knowledge(
+    wrapper: RunContextWrapper[ExecutionContext],
+    improved_cookbook: str
+) -> str:
+    """Update the Triton cookbook with the complete improved version"""
+    cookbook_path = args.data_path / "triton_cookbook.md"
+    
+    # Write the new complete cookbook
+    cookbook_path.write_text(improved_cookbook)
+    
+    return f"Successfully updated cookbook with improved version at {cookbook_path}"
+
+@function_tool
 async def run_triton_code_and_compare(
-    wrapper: RunContextWrapper[UnifiedExecutionContext], 
+    wrapper: RunContextWrapper[ExecutionContext], 
     triton_code: str
 ) -> str:
     """Run Triton code and compare with PyTorch output"""
+    # Store the triton code in context
+    wrapper.context.triton_code = triton_code
+    
     # First run the triton code
-    await run_code(wrapper, triton_code, ExecutionType.TRITON, wrapper.context.tests)
+    result = await run_code(wrapper, triton_code, ExecutionType.TRITON, wrapper.context.tests)
+    
+    # If triton code failed, return the error instead of trying to compare
+    if "Code failed with error" in result:
+        return result
     
     # Then compare outputs
     return await compare_pytorch_triton_outputs(wrapper)
 
 ### First Agent: Generate PyTorch/Triton pairs
-triton_cookbook = Path("./data/triton_cookbook.md").read_text()
+triton_cookbook = get_current_cookbook()
+
 
 class PytorchOutput(BaseModel):
     pt_code: str = Field(description="The PyTorch code for the function")
-    pt_entrypoint: str = Field(description="The entrypoint of the function in Pytorch")
-    tests: str = Field(description="The tests for the function")
-    pt_runs: bool = Field(description="Whether the pytorch code runs or not.")
-    pt_has_output: bool = Field(description="Whether the pytorch code produced output.")
-    pt_error_summary: str = Field(default="", description="Brief summary of any pytorch errors.")
+    tests: str = Field(description="The test code for the function")
+    pt_entrypoint: str = Field(description="The entrypoint/main function name in the PyTorch code")
 
 class TritonOutput(BaseModel):
-    conversion_reasoning: str = Field(default="", description="The reasoning step by step on how the conversion to triton should be done for this specific function")
-    triton_code: str = Field(default="", description="The Triton code for the function, no tests are needed, just the triton code")
-    triton_entrypoint: str = Field(default="", description="The entrypoint of the function in Triton")
-    triton_runs: bool = Field(default=False, description="Whether the triton code runs or not.")
-    triton_has_output: bool = Field(default=False, description="Whether the triton code produced output.")
-    triton_error_summary: str = Field(default="", description="Brief summary of any triton errors.")
-    triton_is_correct: bool = Field(default=False, description="Whether the triton code is correct or not.")
+    triton_code: str = Field(description="The Triton code for the function")
+    conversion_reasoning: str = Field(description="The step-by-step reasoning for converting PyTorch to Triton")
+    triton_entrypoint: str = Field(description="The entrypoint/main function name in the Triton code")
 
-pytorch_generation_system_prompt = f"""We are generating a PyTorch/Triton pairs dataset. We want functions that have exactly the same functionalities.
+pytorch_generation_system_prompt = f"""{RECOMMENDED_PROMPT_PREFIX}
+
+We are generating a PyTorch/Triton pairs dataset. We want functions that have exactly the same functionalities.
 
 Your task is to generate a new row for our dataset. Focus on clarity and simplicity, Triton can be very complex, the idea is generating pairs that are easy to understand and that can be used to learn Triton. With each new sample add more complexity to the code.
 
@@ -330,21 +410,36 @@ test_results = test_add()
 print(test_results)
 ```
 
-You must use the run_pytorch_code_and_tests tool to run your code and tests. You should return a working pytorch implementation of the function with the tests.
+You must use the run_pytorch_code_and_tests tool to run your code and tests. Once you have working pytorch code and tests, you MUST transfer to the PyTorch Output Agent to format the results. Do not provide any final response yourself - always transfer to the output agent.
 """
 
-pytorch_generation_user_prompt = """
-Generate the pytorch code and tests for the function: {function_name}
-description: {function_description}
+pytorch_output_system_prompt = """You are a specialized agent for extracting PyTorch code information into structured output.
+
+Your task is to extract the following from the context:
+1. pt_code: The final working PyTorch code
+2. tests: The test code  
+3. pt_entrypoint: The main function name (not the test function)
+
+For the entrypoint, identify the main function that implements the actual operation. For example, if the code defines:
+```python
+def add(input: torch.Tensor, other: torch.Tensor, alpha: float=1):
+    return torch.add(input, other, alpha=alpha)
+
+def test_add():
+    # test code
+```
+
+The entrypoint should be "add" (not "test_add").
 """
 
-triton_generation_system_prompt = f"""
+triton_generation_system_prompt = f"""{RECOMMENDED_PROMPT_PREFIX}
+
 Your task is to convert the pytorch code into a Triton kernel, the code should be runnable and the output should be the same as the pytorch code. Use the `run_triton_code_and_compare` tool to check if the code is correct.
 
 Here it's a best practice on writing Triton kernels:
-{triton_cookbook}
+{{triton_cookbook}}
 
-Also return reasoning step by step on how the conversion to triton should be done for this specific function. Apply the best practices from the cookbook.
+Also provide reasoning step by step on how the conversion to triton should be done for this specific function. Apply the best practices from the cookbook.
 
 ## Example conversion from pytorch to triton
 
@@ -394,6 +489,27 @@ Why this version is "good":
 - Mask is offs < numel, which correctly covers all n×m elements.
 - All loads/stores use mask, so partial blocks at the end won't run out of bounds.
 - It's clear that tl.maximum(x_vals, 0.0) implements ReLU.
+
+Once you have working triton code that matches the pytorch output, you MUST transfer to the Triton Output Agent to format the results. Do not provide any final response yourself - always transfer to the output agent.
+"""
+
+triton_output_system_prompt = """You are a specialized agent for extracting Triton code information into structured output.
+
+Your task is to extract the following:
+1. triton_code: The final working Triton code
+2. conversion_reasoning: The step-by-step reasoning for how the PyTorch to Triton conversion was done
+3. triton_entrypoint: The main function name in the Triton code (not the kernel)
+
+Look at the conversation history to find the reasoning that was provided during the conversion process.
+
+For the entrypoint, look for the main callable function (not the @triton.jit kernel). For example:
+- If there's `relu_kernel` (the kernel) and `relu` (the wrapper), the entrypoint is "relu"
+- The entrypoint should match the original PyTorch function name
+"""
+
+pytorch_generation_user_prompt = """
+Generate the pytorch code and tests for the function: {function_name}
+description: {function_description}
 """
 
 triton_generation_user_prompt = """Convert the following pytorch code into a Triton kernel.
@@ -411,23 +527,106 @@ No computation logic should be done within the entrypoint function. All computat
 You must use the `run_triton_code_and_compare` tool to check if the code is correct.
 """
 
-pt_agent = Agent[UnifiedExecutionContext](
+class CookbookUpdate(BaseModel):
+    analysis_summary: str = Field(description="Overall analysis of all the collected errors and patterns found")
+    improved_cookbook: str = Field(description="The complete improved cookbook text incorporating lessons learned from all errors")
+    should_update: bool = Field(description="Whether the cookbook should be updated based on the error analysis")
+    key_improvements: list[str] = Field(description="List of key improvements made to the cookbook")
+
+error_reflection_system_prompt = """You are an expert Triton kernel developer and cookbook improvement specialist. Your job is to analyze ALL collected Triton conversion errors from a batch generation process and create an improved version of the entire Triton cookbook.
+
+You will receive:
+1. The current complete Triton cookbook
+2. A collection of ALL errors that occurred during the generation process
+3. Context about each failed conversion (PyTorch code, attempted Triton code, error messages)
+
+Your task is to:
+1. **Analyze Error Patterns**: Look across all errors to identify common patterns, recurring issues, and systematic problems
+2. **Extract Meta-Lessons**: Find higher-level insights about what makes Triton conversions fail
+3. **Improve the Cookbook**: Generate a new, improved version of the COMPLETE cookbook that addresses these issues
+4. **Preserve Good Content**: Keep all valuable existing content while adding new guidance
+
+Focus on:
+- Systematic patterns across multiple failures (not individual bugs)
+- Common misconceptions about Triton that lead to errors
+- Missing guidance in the current cookbook
+- Better examples or clearer explanations needed
+- New anti-patterns or best practices discovered
+
+The improved cookbook should be:
+- Complete and self-contained (full replacement of the original)
+- More comprehensive based on real failure patterns
+- Clearer in areas where errors were common
+- Enhanced with new examples from the error cases
+- Include code examples when possible with the knowledge you acquired to illustrate the new best practices
+
+Only recommend updating the cookbook if there are meaningful patterns worth addressing across multiple errors."""
+
+error_reflection_user_prompt = """Analyze these collected Triton conversion errors and improve the cookbook:
+
+**Current Cookbook:**
+```markdown
+{current_cookbook}
+```
+
+**Collected Errors ({num_errors} total):**
+
+{error_details}
+
+Please analyze these errors for patterns and create an improved version of the complete cookbook that addresses the systematic issues you identified."""
+
+
+# Create the output agents first
+pt_output_agent = Agent[ExecutionContext](
+    name="PyTorchOutputAgent",
+    handoff_description="Specialist agent for extracting and formatting PyTorch code into structured output",
+    model="o4-mini", 
+    instructions=pytorch_output_system_prompt,
+    output_type=PytorchOutput
+)
+
+triton_output_agent = Agent[ExecutionContext](
+    name="TritonOutputAgent",
+    handoff_description="Specialist agent for extracting and formatting Triton code into structured output with reasoning",
+    model="o4-mini",
+    instructions=triton_output_system_prompt, 
+    output_type=TritonOutput
+)
+
+# Create the error reflection agent
+error_reflection_agent = Agent[ExecutionContext](
+    name="ErrorReflectionAgent",
+    handoff_description="Specialist agent for analyzing Triton conversion errors and improving the cookbook",
+    model="o3",
+    instructions=error_reflection_system_prompt,
+    tools=[update_cookbook_with_error_knowledge],
+    output_type=CookbookUpdate
+)
+
+# Create the main agents with handoffs (no output_type)
+pt_agent = Agent[ExecutionContext](
     name="PyTorchAgent", 
     model="o4-mini",
     instructions=pytorch_generation_system_prompt,
     tools=[run_pytorch_code_and_tests],
-    output_type=PytorchOutput
+    handoffs=[pt_output_agent]
 )
 
-triton_agent = Agent[UnifiedExecutionContext](
-    name="TritonAgent", 
-    model="o4-mini",
-    instructions=triton_generation_system_prompt,
-    tools=[run_triton_code_and_compare],
-    output_type=TritonOutput
-)
+def create_triton_agent():
+    """Create triton agent with current cookbook content"""
+    current_cookbook = get_current_cookbook()
+    return Agent[ExecutionContext](
+        name="TritonAgent", 
+        model="o4-mini",
+        instructions=triton_generation_system_prompt.format(triton_cookbook=current_cookbook),
+        tools=[run_triton_code_and_compare],
+        handoffs=[triton_output_agent]
+    )
 
-console.rule("[bold blue]Processing dataset[/bold blue]")
+# Initially create the triton agent
+triton_agent = create_triton_agent()
+
+console.print(Panel.fit("[bold blue]Processing dataset[/bold blue]", border_style="blue"))
 
 def unpack_row(row: dict):
     """Unpack all nested dicts into a flat dict"""
@@ -441,16 +640,49 @@ def unpack_row(row: dict):
 
 @weave.op
 async def generate_row(max_turns: int):
-    # Create unified context
-    context = UnifiedExecutionContext()
+    global current_row_index
     
-    # Generate function description
-    function_name_desc = await generate_function_name_and_description(input_ds)
-    context.function_name = function_name_desc.function_name
-    context.function_description = function_name_desc.function_description
+    # Create unified context
+    context = ExecutionContext()
+    
+    if args.init:
+        # Use existing sample from the dataset
+        if current_row_index >= len(input_ds):
+            raise IndexError(f"Row index {current_row_index} out of range for dataset with {len(input_ds)} samples")
+        
+        sample = input_ds[current_row_index]
+        context.function_name = sample['entrypoint']
+        context.function_description = sample['description']
+        
+        # Update pt_code in context if available
+        if 'pt_code' in sample:
+            context.pt_code = sample['pt_code']
+        
+        current_row_index += 1
+        
+        console_print(Panel(
+            f"[bold cyan]🔄 Using existing sample: {context.function_name}[/bold cyan]\n"
+            f"[dim]{context.function_description}[/dim]",
+            title="Using Existing Sample",
+            border_style="cyan"
+        ))
+    else:
+        # Generate function description
+        function_name_desc = await generate_function_name_and_description(input_ds)
+        context.function_name = function_name_desc.function_name
+        context.function_description = function_name_desc.function_description
+        
+        console_print(Panel(
+            f"[bold cyan]🚀 Generating: {context.function_name}[/bold cyan]\n"
+            f"[dim]{context.function_description}[/dim]",
+            title="Function Generation",
+            border_style="cyan"
+        ))
     
     try:
-        # Run PyTorch agent
+        # Run PyTorch agent (will handoff to pt_output_agent to extract code, tests, and entrypoint)
+        console_print(f"[yellow]📝 Running PyTorch agent...[/yellow]")
+            
         pt_result = await Runner.run(
             starting_agent=pt_agent,
             input=pytorch_generation_user_prompt.format(
@@ -461,49 +693,262 @@ async def generate_row(max_turns: int):
             max_turns=max_turns
         )
         
-        # Store PyTorch results in context
-        context.pt_code = pt_result.final_output.pt_code
-        context.pt_entrypoint = pt_result.final_output.pt_entrypoint
-        context.tests = pt_result.final_output.tests
+        # Extract PyTorch code info from structured output
+        pt_output = pt_result.final_output
         
-        # Run Triton agent with same context
+        # Debug: Check what we got
+        pt_analysis = f"Type: {type(pt_output)}"
+        
+        if isinstance(pt_output, str):
+            pt_analysis += f"\n[red]❌ Got string instead of PytorchOutput[/red]"
+            pt_analysis += f"\n[dim]Preview: {pt_output[:100]}{'...' if len(pt_output) > 100 else ''}[/dim]"
+            # Fallback: extract from context instead
+            pt_code = context.pt_code
+            tests = context.tests  
+            pt_entrypoint = context.function_name  # fallback to function name
+        else:
+            pt_analysis += f"\n[green]✅ Got PytorchOutput successfully[/green]"
+            pt_analysis += f"\nEntrypoint: {pt_output.pt_entrypoint}"
+            pt_analysis += f"\nCode length: {len(pt_output.pt_code)} chars"
+            pt_analysis += f"\nTests length: {len(pt_output.tests)} chars"
+            pt_code = pt_output.pt_code
+            tests = pt_output.tests
+            pt_entrypoint = pt_output.pt_entrypoint
+        
+        console_print(Panel(pt_analysis, title="🔍 PyTorch Analysis", border_style="yellow"))
+        
+        # Run Triton agent (will handoff to triton_output_agent to extract code, reasoning, and entrypoint)
+        console_print(f"[blue]⚡ Running Triton agent...[/blue]")
+            
         triton_result = await Runner.run(
             starting_agent=triton_agent,
             input=triton_generation_user_prompt.format(
-                pt_code=context.pt_code,
-                entrypoint=context.pt_entrypoint
+                pt_code=pt_code,
+                entrypoint=pt_entrypoint
             ),
             context=context,
             max_turns=max_turns
         )
         
-        # Start with the flat context data
+        # Extract Triton code info from structured output
+        triton_output = triton_result.final_output
+        
+        # Debug: Check what we got
+        triton_analysis = f"Type: {type(triton_output)}"
+        
+        if isinstance(triton_output, str):
+            triton_analysis += f"\n[red]❌ Got string instead of TritonOutput[/red]"
+            triton_analysis += f"\n[dim]Preview: {triton_output[:100]}{'...' if len(triton_output) > 100 else ''}[/dim]"
+            # Fallback: extract from context instead
+            triton_code = context.triton_code
+            conversion_reasoning = "Conversion reasoning not captured due to parsing issue"
+            triton_entrypoint = pt_entrypoint  # fallback to same as pytorch
+        else:
+            triton_analysis += f"\n[green]✅ Got TritonOutput successfully[/green]"
+            triton_analysis += f"\nEntrypoint: {triton_output.triton_entrypoint}"
+            triton_analysis += f"\nCode length: {len(triton_output.triton_code)} chars"
+            triton_analysis += f"\nReasoning length: {len(triton_output.conversion_reasoning)} chars"
+            triton_code = triton_output.triton_code
+            conversion_reasoning = triton_output.conversion_reasoning
+            triton_entrypoint = triton_output.triton_entrypoint
+        
+        console_print(Panel(triton_analysis, title="🔍 Triton Analysis", border_style="blue"))
+        
+        # Collect error information for batch analysis if triton failed
+        if not context.triton_runs and context.triton_stderr:
+            error_info = ErrorContext(
+                function_name=context.function_name,
+                function_description=context.function_description,
+                pt_code=pt_code,
+                triton_code=triton_code,
+                triton_error_summary=context.triton_error_summary,
+                triton_stderr=context.triton_stderr,
+                conversion_reasoning=conversion_reasoning
+            )
+            collected_errors.append(error_info)
+            console_print(f"[yellow]📝 Collected error for batch analysis ({len(collected_errors)} total)[/yellow]")
+        
+        # Show execution summary
+        summary = f"PyTorch runs: {'✅' if context.pt_runs else '❌'}"
+        summary += f"\nTriton runs: {'✅' if context.triton_runs else '❌'}"
+        summary += f"\nTriton correct: {'✅' if context.triton_is_correct else '❌'}"
+        if context.pt_stderr:
+            summary += f"\nPyTorch errors: {len(context.pt_stderr)} chars"
+        if context.triton_stderr:
+            summary += f"\nTriton errors: {len(context.triton_stderr)} chars"
+        
+        console_print(Panel(summary, title="📊 Execution Summary", border_style="magenta"))
+        
+        # Start with the flat context data (contains all execution details: stdout, stderr, runs, etc.)
         row_data = context.to_flat_dict()
         
-        # Add final output data (might contain nested dicts)
-        row_data.update(pt_result.final_output.model_dump())
-        row_data.update(triton_result.final_output.model_dump())
+        # Add the structured output data manually
+        row_data.update({
+            "pt_code": pt_code,
+            "tests": tests,
+            "pt_entrypoint": pt_entrypoint,
+            "triton_code": triton_code,
+            "conversion_reasoning": conversion_reasoning,
+            "triton_entrypoint": triton_entrypoint
+        })
+        
+        console_print(Panel(
+            f"[green]🎉 Successfully generated row for {context.function_name}[/green]",
+            title="Success",
+            border_style="green"
+        ))
         
         # Ensure the final result is completely flat
         return unpack_row(row_data)
         
     except Exception as e:
-        console.print(f"[bold red]Error: {e}[/bold red]")
+        error_msg = f"Error generating row for {context.function_name}: {str(e)}"
+        console_print(Panel(f"[bold red]💥 {error_msg}[/bold red]", title="Error", border_style="red"))
+        console_print(f"[red]❌ {error_msg}[/red]", verbose_only=False)  # Always show brief error
+        
+        if args.verbose:
+            import traceback
+            console_print(f"[red]Traceback: {traceback.format_exc()}[/red]")
+        
+        raise e
         return None
 
 @weave.op
 async def generate_rows(n_rows: int, max_turns: int):
+    global current_row_index
+    current_row_index = 0  # Reset counter
+    
+    console_print(Panel(
+        f"[bold blue]🔄 Generating {n_rows} rows with max {max_turns} turns each[/bold blue]",
+        title="Processing Configuration",
+        border_style="blue"
+    ))
+    
+    if args.init:
+        # Limit to available samples
+        available_samples = len(input_ds)
+        if n_rows > available_samples:
+            console_print(f"[yellow]⚠️ Requested {n_rows} rows but only {available_samples} samples available. Using all available samples.[/yellow]")
+            n_rows = available_samples
+        
+        console_print(f"[blue]📋 Using existing dataset samples[/blue]")
+    else:
+        console_print(f"[blue]🎲 Generating {n_rows} new random functions[/blue]")
+    
     tasks = []
-    for _ in range(n_rows):
+    for i in range(n_rows):
+        console_print(f"[dim]Starting row {i+1}/{n_rows}...[/dim]")
         tasks.append(generate_row(max_turns=max_turns))
-    pds_list = await asyncio.gather(*tasks)
-    pds_list = [pds for pds in pds_list if pds is not None]
-    return pds_list
+    
+    pds_list = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Count successes and failures
+    successes = [pds for pds in pds_list if pds is not None and not isinstance(pds, Exception)]
+    failures = [pds for pds in pds_list if pds is None or isinstance(pds, Exception)]
+    
+    # Results summary
+    mode_desc = "existing samples" if args.init else "generated functions"
+    result_text = f"[bold green]✅ Successfully processed: {len(successes)}/{n_rows} {mode_desc}[/bold green]"
+    if failures:
+        result_text += f"\n[bold red]❌ Failed: {len(failures)}/{n_rows} {mode_desc}[/bold red]"
+    
+    console_print(Panel(result_text, title="📈 Final Results", border_style="green"))
+    
+    return successes
 
-new_rows = asyncio.run(generate_rows(n_rows=3, max_turns=args.max_turns))
+@weave.op
+async def analyze_errors_and_improve_cookbook():
+    """Analyze all collected errors and improve the cookbook if needed"""
+    if not collected_errors:
+        console_print("[yellow]📚 No errors collected - cookbook analysis skipped[/yellow]")
+        return
+    
+    console_print(Panel(
+        f"[bold blue]🔍 Analyzing {len(collected_errors)} collected errors for cookbook improvement[/bold blue]",
+        title="Batch Error Analysis",
+        border_style="blue"
+    ))
+    
+    # Format error details for the prompt
+    error_details_list = []
+    for i, error in enumerate(collected_errors, 1):
+        error_detail = f"""
+**Error {i}: {error.function_name}**
+- **Description:** {error.function_description}
+- **PyTorch Code:**
+```python
+{error.pt_code}
+```
+- **Triton Code (failed):**
+```python
+{error.triton_code}
+```
+- **Error Message:** {error.triton_error_summary}
+- **Conversion Reasoning:** {error.conversion_reasoning}
+- **Stderr:** {error.triton_stderr[:300]}{'...' if len(error.triton_stderr) > 300 else ''}
+"""
+        error_details_list.append(error_detail)
+    
+    error_details = "\n".join(error_details_list)
+    current_cookbook = get_current_cookbook()
+    
+    try:
+        # Create a temporary context for the error analysis
+        analysis_context = ExecutionContext()
+        
+        # Run error reflection agent with all collected errors
+        error_result = await Runner.run(
+            starting_agent=error_reflection_agent,
+            input=error_reflection_user_prompt.format(
+                current_cookbook=current_cookbook,
+                num_errors=len(collected_errors),
+                error_details=error_details
+            ),
+            context=analysis_context,
+            max_turns=10  # Give more turns for comprehensive analysis
+        )
+        
+        # Process the result
+        cookbook_update = error_result.final_output
+        
+        if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
+            console_print(Panel(
+                f"[green]📚 Cookbook improvement recommended![/green]\n"
+                f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]\n"
+                f"[bold]Key Improvements:[/bold]\n" + 
+                "\n".join([f"• {improvement}" for improvement in cookbook_update.key_improvements[:3]]),
+                title="Cookbook Analysis Complete",
+                border_style="green"
+            ))
+            
+            # The improved cookbook will be updated via the tool call that was made during agent execution
+            console_print(f"[green]✅ Cookbook has been updated with improvements based on {len(collected_errors)} errors[/green]")
+            
+        else:
+            console_print(Panel(
+                f"[yellow]📚 No cookbook improvement needed[/yellow]\n"
+                f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]",
+                title="Cookbook Analysis Complete", 
+                border_style="yellow"
+            ))
+            
+    except Exception as e:
+        console_print(Panel(
+            f"[red]❌ Error during batch cookbook analysis: {str(e)}[/red]",
+            title="Analysis Error",
+            border_style="red"
+        ))
+
+new_rows = asyncio.run(generate_rows(n_rows=21, max_turns=args.max_turns))
+
+# After generating all rows, analyze errors and improve cookbook
+asyncio.run(analyze_errors_and_improve_cookbook())
 
 pds = Dataset.from_list(new_rows)
+if args.init:
+    output_dataset_name = args.output_dataset.replace("/", "_") + "_init"
 pds.save_to_disk(args.output_dataset.replace("/", "_"))
 
 if args.push:
     input_ds.push_to_hub(args.output_dataset)
+

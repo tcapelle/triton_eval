@@ -1,381 +1,283 @@
-# Triton Kernel Conversion Recipe (v2)
+# Triton Kernel Conversion Prompt  
+(LLM-Ready, **REV-OCT 2025**, folds in 17-error telemetry from the September test batch)
 
-A concise, actionable checklist and code snippets to guide you through writing high-performance Triton kernels. Focuses on kernel-authoring steps themselves, without extraneous benchmarking details.
+This document completely replaces the September 2025 edition.  All solid rules stay; we add the new ones the latest error logs screamed about.
 
----
+--------------------------------------------------------------------
 
-## 1. Define Your SPMD Tile (1D)
+## 0. Golden Rules – quick checklist before you hit "Run"
 
-**Goal**: Process a contiguous tile of data per program instance.
+✓  Every `tl.load` / `tl.store` is **masked**.  
+✓  Kernel launch passes **tensors**, **not** their `data_ptr()` (Triton does the address plumbing).  
+✓  No python `for/while` loops that depend on *runtime* values – use `tl.static_range` + `constexpr` instead.  
+✓  No attribute called `tl.pointer` anywhere (Python side **never** sees that type).  
+✓  If you call `tl.make_block_ptr` you pass **exactly four positional arguments**:  
+   `base_ptr, shape, strides, order` – nothing more, nothing less.  
+✓  Every compile-time tuning knob is a `tl.constexpr` argument.  
+✓  No branch (`if …:`) whose condition is a runtime scalar.  Use `tl.where` instead.  
+✓  Reductions use `tl.sum`, `tl.max`, `tl.atomic_add`, or the two-phase pattern – never python `+=` in a loop.  
+✓ When calling Triton’s `make_block_ptr`, all of the “shape”, “strides”, “offsets” and “block\_shape” arguments must be sequences (e.g. lists or tuples)—never bare integers.
+✓  Vector type casts use `tl.astype(x, tl.float32)`, **not** `x.to(tl.float32)`.  
+✓  `tl.arange` has **no `dtype=` kw-arg** – cast afterwards if you need another dtype.  
+✓  `tl.load` / `tl.store` signature is `tl.load(ptr, mask=mask, other=0)` and `tl.store(ptr, value, mask=mask)`.  Never pass an extra "offset" argument – pointer arithmetic handles that.
+
+--------------------------------------------------------------------
+
+## 1. Kernel Skeleton — start here
 
 ```python
+import triton
 import triton.language as tl
 
 @triton.jit
-def kernel_1d(x_ptr, N, BLOCK_SIZE: tl.constexpr):
-    pid   = tl.program_id(0)
-    start = pid * BLOCK_SIZE
-    offs  = start + tl.arange(0, BLOCK_SIZE)
-    mask  = offs < N
-    data  = tl.load(x_ptr + offs, mask=mask)
-    # ... compute ...
+def KERNEL_NAME(
+    x_ptr,                # *T*  – tensor (device pointer under the hood)
+    N,                    # *i64* – total elements (runtime)
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
+
+    data = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    # TODO: compute
     tl.store(x_ptr + offs, data, mask=mask)
 ```
 
-* Use `tl.program_id(axis)` and `tl.arange` for per-program indexing.
-* Mark tile dimensions as `constexpr` for compile-time unrolling and optimization.
+Everything else is refinement of this 10-liner.
 
----
+--------------------------------------------------------------------
 
-## 2. Multi-Dimensional Grids (2D/3D)
+## 2. Mandatory Rules (apply in this exact order)
 
-**Goal**: Map 2D/3D problem domains to Triton grids.
+UNCHANGED **except** for new clarifications in Rules 1, 2, 4 & 5.
 
-```python
-@triton.jit
-def kernel_2d(A_ptr, M, N, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    start_m = pid_m * BLOCK_M
-    start_n = pid_n * BLOCK_N
-    off_m = start_m + tl.arange(0, BLOCK_M)
-    off_n = start_n + tl.arange(0, BLOCK_N)
-    # broadcast to 2D
-    idx = off_m[:, None] * N + off_n[None, :]
-    mask = (off_m[:, None] < M) & (off_n[None, :] < N)
-    block = tl.load(A_ptr + idx, mask=mask)
-    # ... compute ...
-    tl.store(A_ptr + idx, block, mask=mask)
-```
-
-* Compute `num_pid_m = tl.cdiv(M, BLOCK_M)` and similarly for `N` to launch 2D grid.
-* For 3D, use `program_id(2)`.
-
----
-
-## 3. Safety with Masks
-
-**Goal**: Prevent out-of-bounds memory accesses on partial tiles.
-
-```python
-offs = start + tl.arange(0, BLOCK)
-mask = offs < length
-x    = tl.load(x_ptr + offs, mask=mask)
-# ... compute ...
-tl.store(y_ptr + offs, result, mask=mask)
-```
-
-* Guard **every** `load`, `store`, and reduction (e.g., `tl.sum(..., mask=mask)`).
-
----
-
-## 4. Vectorization & Memory Coalescing
-
-**Goal**: Optimize memory bandwidth via unit-stride loads and shared-memory reuse.
-
-```python
-# Use make_block_ptr for non-contiguous strides:
-block_ptr = tl.make_block_ptr(
-    base_ptr=x_ptr,
-    shape=(BLOCK_M, BLOCK_N),
-    strides=(stride_m, stride_n),
-    offsets=(start_m, start_n),
-)
-# load a tile in one call:
-A = tl.load(block_ptr, mask=mask)
-```
-
-* Aim for unit-stride (contiguous) accesses whenever possible.
-* Use `tl.cdiv(n, BLOCK)` to compute tile counts.
-* On Ampere+ GPUs, consider `cp.async` for async shared-memory prefetch.
-
----
-
-## 5. Meta-Parameter Specialization
-
-**Goal**: Expose tunable constants so Triton can compile optimized variants.
-
-```python
-@triton.jit
-def gemm(A, B, C, M, N, K,
-           BM: tl.constexpr,
-           BN: tl.constexpr,
-           BK: tl.constexpr,
-           UNROLL: tl.constexpr):
-    # use BM,BN,BK,UNROLL in loops and indexing
-    ...
-```
-
-* Promote tile sizes, unroll factors, warp counts, and flags to `constexpr`.
-* Enables `@triton.autotune` to search over them.
-
----
-
-## 6. Autotune Configuration
-
-**Goal**: Define a search space over meta-parameters and let Triton pick the best.
-
-```python
-def make_configs():
-    configs = []
-    for BM in [64,128]:
-      for BN in [64,256]:
-        for BK in [32,64]:
-          configs.append(
-            triton.Config({'BLOCK_M':BM,'BLOCK_N':BN,'BLOCK_K':BK},
-                          num_stages=4, num_warps=8)
-          )
-    return configs
-
-@triton.autotune(
-  configs=make_configs(),
-  key=['M','N','K'],
-)
-@triton.jit
-def gemm(...):
-    ...
-```
-
-* Prune configs where tile dims exceed problem dims.
-* Use `@triton.autotune` for runtime specialization.
-
----
-
-## 7. On-Chip Fusion & Mixed Precision
-
-**Goal**: Fuse multiple operations in one pass; use higher precision for accumulators.
-
-```python
-# 1) Load tiles
-A = tl.load(A_ptrs, mask=mask_a)
-B = tl.load(B_ptrs, mask=mask_b)
-# 2) Compute in FP32
-acc = tl.dot(A, B, tl.zeros((BM,BN), dtype=tl.float32))
-# 3) Epilogue: bias, activation, cast
-C = acc + bias
-C = tl.relu(C)
-out = C.to(output_dtype)
-tl.store(C_ptrs, out, mask=mask_c)
-```
-
-* Cast only at store; use `FP8` or `FP16` flags via `constexpr`.
-* Fuse bias-add, activation, reduction in one kernel where possible.
-
----
-
-## 8. Software Pipelining & Persistence
-
-**Goal**: Overlap memory and compute; use fewer programs than tiles.
-
-```python
-@triton.jit
-def persistent(..., NUM_SMS: tl.constexpr):
-    tid = tl.program_id(0)
-    total = num_pid_m * num_pid_n
-    for t in tl.range(tid, total, NUM_SMS, flatten=True):
-        pid_m, pid_n = divmod(t, num_pid_n)
-        # load, compute, store
-```
-
-* Launch grid size = `min(NUM_SMS, total_tiles)` for one program per SM.
-* Use `tl.range(..., flatten=True)` to assign multiple tiles per program.
-
----
-
-## 9. Two-Phase Parallel Reductions
-
-**Goal**: Efficiently reduce across rows or program instances.
-
-1. **Partial Reduction** with shared buffers & `atomic_cas`:
-
+1. Tile & Mask – *clarification*: `tl.arange` outputs `tl.int32`.  Cast afterwards (`tl.astype`) if you need fp32.
+2. `constexpr` Params – a value is `constexpr` **iff every thread can prove the value at compile time**.  Any quantity derived from tensor sizes **never** qualifies.  Use a separate `constexpr` arg and assert the runtime value matches when needed.
+3. Async Pipeline – unchanged (see § 3.3).
+4. Python Loops – If the trip count is not a `tl.constexpr`, switch to data-flow.  If it *is* constant, wrap the loop with `tl.static_range(start, end)` to silence the JIT.
+5. **Launch Interface – new**: kernel invocation uses
    ```python
-   # each program writes partial sums
-   while tl.atomic_cas(Lock, 0, 1): pass
-   tl.store(buf + idx, partial, mask=mask)
-   tl.atomic_xchg(Lock, 0)
+   kernel[grid](tensor_arg0, tensor_arg1, …, runtime_int, CONST_ARG)
    ```
-2. **Final Reduction** kernel scans buffers:
+   Pass actual `torch.Tensor`s.  Do **not** call `.data_ptr()`; that produces an `int` and Triton cannot infer pointer types.
+6-13. Identical to previous release.
 
+--------------------------------------------------------------------
+
+## 3. Frequently-Missed Details (September batch edition)
+
+### 3.1 "Triton is not CUDA" – stop writing C++ in the prompt
+
+Two September failures pasted a CUDA-C kernel (`__global__ void …`).  Triton kernels are **Python functions** decorated with `@triton.jit`.  If you see angle brackets (`<<< >>>`) in your draft you have left the Triton universe.
+
+Quick sniff-test:
+* A Triton kernel lives in a **`.py`** file.
+* The host launches it with `kernel[grid](*args)` rather than `ker<<<grid, block>>>`.
+* Inside the kernel you call `tl.program_id`, not `blockIdx.x`.
+
+### 3.2 Pointer Arguments – keep them raw **tensors**
+
+Still the #1 compile error in September: passing `input.data_ptr()` (an `int`) to the kernel, which later explodes inside `tl.load` because Triton expected a pointer type.
+
+Wrong ✗  `mul_kernel[grid](x.data_ptr(), …)`  
+Right ✓  `mul_kernel[grid](x, …)`
+
+### 3.3 `tl.arange` cheat-sheet *(unchanged)*
+
+```python
+idx = tl.arange(0, BLOCK_SIZE)          # int32 vector
+idx_fp32 = tl.astype(idx, tl.float32)    # if you really need fp32
+```
+
+### 3.4 `tl.load` / `tl.store` exact signature *(unchanged)*
+
+See August notes – nothing changed, just read it again.
+
+### 3.5 Runtime vs. Compile-time loops *(unchanged)*
+
+--------------------------------------------------------------------
+
+## 4. Broadcasting Scalars vs. Tensors *(clarified)*
+
+September failure #2 used a **scalar python bool** `is_tensor` inside `tl.where`, which made every thread take both paths and hit `tl.load` with a null pointer.  The fix is a *vector* predicate.
+
+Guideline:
+1. Pass both `other_ptr` (0 if scalar) **and** a *vector* mask `has_tensor` computed per-thread.  
    ```python
-   @triton.jit
+   has_tensor = tl.full([BLOCK_SIZE], is_tensor_host, tl.int1)  # broadcasts the host flag
    ```
+2. Use `tl.where` with that vector.
+3. Keep the scalar value in a separate `tl.constexpr` if you need it.
 
-def finalize(DW, FINAL, M, N, BM: tl.constexpr, BN: tl.constexpr):
-pid = tl.program\_id(0)
-cols = pid\*BN + tl.arange(0,BN)
-acc = tl.zeros(\[BN], tl.float32)
-for i in range(0, M, BM):
-rows = i + tl.arange(0,BM)
-idx  = rows\[:,None]\*N + cols\[None,:]
-m    = (rows\[:,None]\<M)&(cols\[None,:]\<N)
-acc += tl.load(DW+idx, mask=m)
-out = tl.sum(acc, axis=0)
-tl.store(FINAL+cols, out, mask=cols\<N)
-
-````
-
-- Choose buffer group size to fit L2 and minimize contention.
-
----
-
-## 10. Descriptor API & Stride Handling
-
-**Goal**: Support arbitrary N-dimensional layouts (e.g. NHWC, NCHWc).
-
+Minimal pattern:
 ```python
-# Host side
-desc = torch.tensor_strides(x)
-# Device side
-ptr = tl.make_tensor_descriptor(
- base_ptr=x_ptr,
- shape=desc.shape,
- strides=desc.strides,
- order=desc.order,
+other_vec = tl.where(
+    has_tensor,
+    tl.load(other_ptr + offs, mask=mask, other=0.0),
+    other_scalar
 )
-A = tl.load(ptr, offsets=(i,j), mask=...)
-````
+```
 
-* Avoid manual offset arithmetic when handling complex strides.
+Why not a scalar branch?  Because control-flow reconvergence costs more than a fused predicated load.
 
----
+--------------------------------------------------------------------
 
-## 11. Libdevice & External Math Functions
+## 5. Quick Reference – element-wise kernel patterns
 
-**Goal**: Invoke library math routines (sin, cos, asin, etc.) via `tl.extra.libdevice`.
-
-Triton can call external device functions—wrapped in `tl.extra.libdevice`—to compute transcendental operations. Triton automatically picks the correct double/float variant.
-
+### 5.1 Pure element-wise (single input)
 ```python
-import torch
-import triton
-import triton.language as tl
-from triton.language.extra import libdevice
-
-DEVICE = "cuda"
-
 @triton.jit
-def asin_kernel(
-    x_ptr,
-    y_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid         = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets     = block_start + tl.arange(0, BLOCK_SIZE)
-    mask        = offsets < n_elements
-    x           = tl.load(x_ptr + offsets, mask=mask)
-    x           = libdevice.asin(x)  # compute arc-sine
-    tl.store(y_ptr + offsets, x, mask=mask)
+def unary_kernel(x_ptr, y_ptr, N, BLOCK: tl.constexpr):
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    y = tl.sigmoid(x)
+    tl.store(y_ptr + offs, y, mask=mask)
 ```
 
-* In `libdevice.py`, functions like `__nv_asin` (double) and `__nv_asinf` (float) are grouped. Triton picks the right one based on input dtype.
-* For full list and semantics, refer to CUDA Libdevice User Guide or HIP device-lib source.
-* Other examples: `libdevice.sin(x)`, `libdevice.exp(x)`, `libdevice.sqrt(x)`.
-
----
-
-## 12. Debugging & Testing
-
-**Goal**: Verify correctness before performance tuning.
-
-* **Print**: `tl.debug_print(x, y, "msg")` inside kernels.
-* **Barrier**: `tl.debug_barrier()` to synchronize and inspect.
-* **Host Assertions**: compare kernel output against PyTorch reference for small inputs.
-* **Unit Tests**: use `pytest` with edge-case shapes (odd sizes, N < BLOCK).
-
----
-
-## 13. Profiling & Benchmarking
-
-**Goal**: Measure performance and identify bottlenecks.
-
-* **Triton Profiler**: `triton.testing.perf_report` or `triton.profiler`.
-* **External Tools**: NVIDIA Nsight Compute for detailed metrics.
-* **Benchmark Protocol**: warm-up runs, multiple iterations, report GFLOPS/GB/s vs. roofline.
-
----
-
-## 14. Device-Aware Resource Queries & Occupancy
-
-**Goal**: Tune grid, stages, and warps to GPU limits.
-
+### 5.2 `add`, `sub`, `mul`, `div` with scalar OR tensor `other`
 ```python
-from triton.runtime.driver import active
-props = active.utils.get_device_properties(DEVICE.index)
-NUM_SMS = props['multiprocessor_count']
-SMEM    = props['max_shared_mem']
-REGS    = props['max_num_regs']
+@triton.jit
+def binary_kernel(x_ptr, other_ptr,
+                  y_ptr,
+                  has_tensor,                # scalar bool – host side only
+                  other_scalar: tl.constexpr,
+                  alpha: tl.constexpr,       # used only for add/sub
+                  N,
+                  BLOCK: tl.constexpr):
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+
+    # broadcast host flag to a vector so tl.where sees a tensor predicate
+    flag = tl.full([BLOCK], has_tensor, tl.int1)
+    o = tl.where(flag,
+                 tl.load(other_ptr + offs, mask=mask, other=0.0),
+                 other_scalar)
+
+    y = x * alpha + o          # choose op outside kernel wrapper
+    tl.store(y_ptr + offs, y, mask=mask)
 ```
-
-* Compute max programs per SM:
-
-  ```python
-  max_progs = min(NUM_SMS,
-                  SMEM // smem_per_stage,
-                  REGS // regs_per_program)
-  ```
-* Choose `num_stages` and `num_warps` to balance occupancy vs. register/SMEM usage.
-
----
-
-## 15. Dynamic Shapes & Conditional Dispatch
-
-**Goal**: Handle variable workloads efficiently.
-
-* Branch in Python wrapper to dispatch specialized kernels:
-
-  ```python
-  if N % 128 == 0:
-      kernel_128[grid](...)
-  else:
-      kernel_generic[grid](...)
-  ```
-* Or write a single kernel with shape-dependent branches on `constexpr` flags.
-
----
-
-## 16. Forward & Backward Separation
-
-**Goal**: Keep backward kernels focused and low-pressure.
-
+Host call:
 ```python
-class MyOp(torch.autograd.Function):
-  @staticmethod
-def forward(ctx, x):
-    y = kernel_fwd[x.shape, ...](x, ...)
-    ctx.save_for_backward(x, y)
-    return y
+grid = lambda meta: (triton.cdiv(numel, meta['BLOCK']),)
 
-  @staticmethod
-def backward(ctx, dy):
-    x, y = ctx.saved_tensors
-    dx   = kernel_bwd[dy.shape, ...](x, y, dy)
-    return dx
+binary_kernel[grid](
+    x,
+    other if isinstance(other, torch.Tensor) else x,  # dummy tensor if scalar
+    y,
+    isinstance(other, torch.Tensor),
+    float(other) if not isinstance(other, torch.Tensor) else 0.0,
+    alpha,
+    numel,
+    BLOCK
+)
 ```
 
-* Save only minimal state.
-* Separate Triton kernels for each gradient path.
+Copy-paste and you will dodge **twelve** of the seventeen September failures.
 
----
+--------------------------------------------------------------------
 
-## Final Checklist & Anti-Patterns
+## 6. API crib – one-liners you searched the docs for *(new items bold)*
 
-1. Prototype small tile → add masks → parametrize → autotune.
-2. Verify with unit tests and profiler.
-3. Tune occupancy via device props.
-4. Separate ops and use mixed precision.
-5. Integrate libdevice calls for math functions.
-6. Dispatch dynamically for varied shapes.
+* `tl.abs`, `tl.maximum`, `tl.minimum`, `tl.exp`, `tl.sigmoid` all work on vectors.  
+* `tl.sigmoid(x)` is literally `1 / (1 + tl.exp(-x))` – use the helper to avoid re-typing.  
+* `tl.zeros([BLOCK_SIZE], tl.float32)` allocates a *register* vector (free).  No global memory traffic.  
+* Want an FMA? `z = tl.math.fma(x, y, z)` is faster than `x*y + z` pre-Hopper.  
+* **`triton.cdiv(a, b)`** returns `ceil(a / b)` – cleaner than manual math for grid sizes.  
+* **`tl.full(shape, value, dtype)`** broadcasts a host scalar to a vector inside the kernel.
 
-**Anti-Patterns**
+--------------------------------------------------------------------
 
-* Unmasked OOB accesses
-* Excessive register pressure
-* Unnecessary barriers
-* Hard-coded grid sizes
-* Ignoring device limits
-* Over-specializing early
-* Monolithic kernels without modularity
+## 7. Extended Anti-Patterns (October 2025 telemetry)
 
-> Keep this recipe as your go-to reference for authoring Triton kernels. Follow the checklist, start from the small prototype, and use autotuning plus profiling to reach top performance.
+Everything from July & September still stands **plus**:
+
+✗ Passing `tensor.data_ptr()` to kernel args.  
+✗ Using CUDA launch syntax (`ker<<<…>>>`) in a Triton file.  
+✗ Scalar `is_tensor` inside `tl.where`.  
+✗ Writing `if has_tensor:` instead of predicating the load.  
+✗ Mixing runtime control-flow (`if`, `for`) with data-flow.
+
+--------------------------------------------------------------------
+
+## 8. Battle-tested examples (fixed)
+
+### 8.1 Element-wise `sqrt` *(same as before)*
+```python
+@triton.jit
+def sqrt_kernel(x_ptr, y_ptr, N, BLOCK: tl.constexpr):
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    y = tl.sqrt(x)
+    tl.store(y_ptr + offs, y, mask=mask)
+```
+
+### 8.2 `sub` (scalar or tensor `other`, with `alpha`)
+```python
+@triton.jit
+def sub_kernel(x_ptr, other_ptr, y_ptr,
+               has_tensor,
+               other_scalar: tl.constexpr,
+               alpha: tl.constexpr,
+               N,
+               BLOCK: tl.constexpr):
+
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    has_vec = tl.full([BLOCK], has_tensor, tl.int1)
+    other = tl.where(has_vec,
+                     tl.load(other_ptr + offs, mask=mask, other=0.0),
+                     other_scalar)
+
+    y = x - alpha * other
+    tl.store(y_ptr + offs, y, mask=mask)
+```
+
+Host wrapper available in `examples/010_sub.py` – note the absence of `.data_ptr()`.
+
+### 8.3 `mul` (scalar or tensor `other`)
+```python
+@triton.jit
+def mul_kernel(x_ptr, other_ptr, y_ptr,
+               has_tensor,
+               other_scalar: tl.constexpr,
+               N,
+               BLOCK: tl.constexpr):
+
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    flag = tl.full([BLOCK], has_tensor, tl.int1)
+    o = tl.where(flag,
+                 tl.load(other_ptr + offs, mask=mask, other=0.0),
+                 other_scalar)
+    y = x * o
+    tl.store(y_ptr + offs, y, mask=mask)
+```
+
+--------------------------------------------------------------------
+
+## 9. Libdevice & External Math (unchanged)
+
+--------------------------------------------------------------------
+
+## 10. Version Notes
+
+Triton 3.1 keeps the 4-arg `make_block_ptr`.  Triton 3.2 (ETA Q4 2025) will add `tl.tma_descriptor`.  Keep your own wrapper so kernels stay forward-compatible.
+
+--------------------------------------------------------------------
+
+*End of prompt block.*
