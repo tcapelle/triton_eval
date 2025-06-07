@@ -32,8 +32,12 @@ class Args:
     num_proc: int = 10
     max_turns: int = 20
     verbose: bool = False
-    init: bool = True
+    init: bool = False
     data_path: Path = Path("./data")
+    n_rows: int = 3
+    entrypoint: str = "pt_entrypoint"
+    description: str = "function_description"
+    batch_size: int = 10
 
 args = sp.parse(Args)
 
@@ -48,7 +52,7 @@ def load_ds(dataset_name, init=True):
     elif "/" in dataset_name:
         return load_dataset(dataset_name)["train"]
     else:
-        return load_from_disk(dataset_name)["train"]
+        return load_from_disk(dataset_name)
 
 console.print(Panel.fit(f"[bold blue]Loading dataset: {args.input_dataset}[/bold blue]", border_style="blue"))
 
@@ -92,6 +96,18 @@ collected_errors = []
 # Row counter for init mode
 current_row_index = 0
 
+def reset_global_state():
+    """Reset global state for clean execution"""
+    global collected_errors, current_row_index
+    collected_errors.clear()
+    current_row_index = 0
+
+def recreate_triton_agent():
+    """Recreate triton agent with updated cookbook content"""
+    global triton_agent
+    triton_agent = create_triton_agent()
+    console_print("[blue]🔄 Triton agent recreated with updated cookbook[/blue]")
+
 class ErrorContext(BaseModel):
     function_name: str
     function_description: str
@@ -129,7 +145,7 @@ Generate a new function that is not in the dataset.
 """
 
 def dump_ds(ds):
-    return "\n".join([f"{row['entrypoint']}: {row['description']}" for row in ds])
+    return "\n".join([f"{row[args.entrypoint]}: {row[args.description]}" for row in ds])
 
 async def generate_function_name_and_description(input_ds):
     current_ds_rows = dump_ds(input_ds)
@@ -140,7 +156,7 @@ async def generate_function_name_and_description(input_ds):
     response = await client.responses.parse(
         model="gpt-4.1",
         input=messages,
-        temperature=1.0,
+        temperature=1.5,
         text_format=FunctionNameAndDescription,
     )
     return response.output_parsed
@@ -639,7 +655,7 @@ def unpack_row(row: dict):
     return unpacked_data
 
 @weave.op
-async def generate_row(max_turns: int):
+async def generate_row(max_turns: int, function_name: str = None, function_description: str = None):
     global current_row_index
     
     # Create unified context
@@ -651,8 +667,8 @@ async def generate_row(max_turns: int):
             raise IndexError(f"Row index {current_row_index} out of range for dataset with {len(input_ds)} samples")
         
         sample = input_ds[current_row_index]
-        context.function_name = sample['entrypoint']
-        context.function_description = sample['description']
+        context.function_name = sample[args.entrypoint]
+        context.function_description = sample[args.description]
         
         # Update pt_code in context if available
         if 'pt_code' in sample:
@@ -667,10 +683,9 @@ async def generate_row(max_turns: int):
             border_style="cyan"
         ))
     else:
-        # Generate function description
-        function_name_desc = await generate_function_name_and_description(input_ds)
-        context.function_name = function_name_desc.function_name
-        context.function_description = function_name_desc.function_description
+        # Use pre-generated function info
+        context.function_name = function_name
+        context.function_description = function_description
         
         console_print(Panel(
             f"[bold cyan]🚀 Generating: {context.function_name}[/bold cyan]\n"
@@ -814,6 +829,34 @@ async def generate_row(max_turns: int):
         return None
 
 @weave.op
+async def generate_new_functions_parallel(n_rows: int, max_turns: int):
+    """Generate new functions sequentially, then run code generation in parallel"""
+    console_print(f"[blue]🎲 Generating {n_rows} new random functions[/blue]")
+    
+    # First, generate all function names/descriptions sequentially to avoid repetition
+    console_print(f"[yellow]📝 Generating {n_rows} unique function names/descriptions...[/yellow]")
+    function_infos = []
+    for i in range(n_rows):
+        console_print(f"[dim]Generating function {i+1}/{n_rows}...[/dim]")
+        function_info = await generate_function_name_and_description(input_ds)
+        function_infos.append(function_info)
+        console_print(f"[green]✅ Generated: {function_info.function_name}[/green]")
+    
+    # Now run the actual row generation in parallel with pre-generated function info
+    console_print(f"[blue]⚡ Running parallel code generation for {n_rows} functions...[/blue]")
+    tasks = []
+    for i, function_info in enumerate(function_infos):
+        console_print(f"[dim]Starting code generation for row {i+1}/{n_rows}: {function_info.function_name}...[/dim]")
+        tasks.append(generate_row(
+            max_turns=max_turns,
+            function_name=function_info.function_name,
+            function_description=function_info.function_description
+        ))
+    
+    pds_list = await asyncio.gather(*tasks, return_exceptions=True)
+    return pds_list
+
+@weave.op
 async def generate_rows(n_rows: int, max_turns: int):
     global current_row_index
     current_row_index = 0  # Reset counter
@@ -832,15 +875,16 @@ async def generate_rows(n_rows: int, max_turns: int):
             n_rows = available_samples
         
         console_print(f"[blue]📋 Using existing dataset samples[/blue]")
+        
+        # For init mode, just create tasks directly
+        tasks = []
+        for i in range(n_rows):
+            console_print(f"[dim]Starting row {i+1}/{n_rows}...[/dim]")
+            tasks.append(generate_row(max_turns=max_turns))
+        
+        pds_list = await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        console_print(f"[blue]🎲 Generating {n_rows} new random functions[/blue]")
-    
-    tasks = []
-    for i in range(n_rows):
-        console_print(f"[dim]Starting row {i+1}/{n_rows}...[/dim]")
-        tasks.append(generate_row(max_turns=max_turns))
-    
-    pds_list = await asyncio.gather(*tasks, return_exceptions=True)
+        pds_list = await generate_new_functions_parallel(n_rows, max_turns)
     
     # Count successes and failures
     successes = [pds for pds in pds_list if pds is not None and not isinstance(pds, Exception)]
@@ -924,6 +968,9 @@ async def analyze_errors_and_improve_cookbook():
             # The improved cookbook will be updated via the tool call that was made during agent execution
             console_print(f"[green]✅ Cookbook has been updated with improvements based on {len(collected_errors)} errors[/green]")
             
+            # Recreate triton agent with updated cookbook
+            recreate_triton_agent()
+            
         else:
             console_print(Panel(
                 f"[yellow]📚 No cookbook improvement needed[/yellow]\n"
@@ -939,16 +986,77 @@ async def analyze_errors_and_improve_cookbook():
             border_style="red"
         ))
 
-new_rows = asyncio.run(generate_rows(n_rows=21, max_turns=args.max_turns))
+@weave.op
+async def extend_dataset(n_rows: int, max_turns: int, batch_size: int):
+    """Main async function to handle batch processing"""
+    # Reset global state for clean execution
+    reset_global_state()
+    
+    # Generate rows in batches and accumulate them
+    all_new_rows = []
+    total_batches = (n_rows + batch_size - 1) // batch_size  # Ceiling division
 
-# After generating all rows, analyze errors and improve cookbook
-asyncio.run(analyze_errors_and_improve_cookbook())
+    console.print(Panel(
+        f"[bold blue]🚀 Processing {n_rows} rows in {total_batches} batches of {batch_size}[/bold blue]",
+        title="Batch Processing Configuration",
+        border_style="blue"
+    ))
 
-pds = Dataset.from_list(new_rows)
-if args.init:
-    output_dataset_name = args.output_dataset.replace("/", "_") + "_init"
-pds.save_to_disk(args.output_dataset.replace("/", "_"))
+    for batch_idx in range(total_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, n_rows)
+        current_batch_size = end_idx - start_idx
+        
+        console_print(Panel(
+            f"[bold cyan]📦 Processing batch {batch_idx + 1}/{total_batches} ({current_batch_size} rows)[/bold cyan]",
+            title=f"Batch {batch_idx + 1}",
+            border_style="cyan"
+        ))
+        
+        batch_rows = await generate_rows(n_rows=current_batch_size, max_turns=max_turns)
+        all_new_rows.extend(batch_rows)
+        
+        console_print(f"[green]✅ Batch {batch_idx + 1} completed: {len(batch_rows)} rows generated[/green]")
+        console_print(f"[blue]📊 Total rows so far: {len(all_new_rows)}/{n_rows}[/blue]")
 
-if args.push:
-    input_ds.push_to_hub(args.output_dataset)
+    # After generating all rows, analyze errors and improve cookbook
+    await analyze_errors_and_improve_cookbook()
+
+    console.print(Panel(
+        f"[bold green]🎉 Generated {len(all_new_rows)} new rows total[/bold green]",
+        title="Generation Complete",
+        border_style="green"
+    ))
+
+    # Load existing dataset and append new rows
+    try:
+        console_print(f"[yellow]📚 Loading existing dataset: {args.input_dataset}[/yellow]")
+        existing_ds = load_ds(args.input_dataset, init=False)
+        existing_rows = list(existing_ds)
+        
+        console_print(f"[blue]📋 Existing dataset has {len(existing_rows)} rows[/blue]")
+        
+    except Exception as e:
+        console_print(f"[yellow]⚠️ Could not load existing dataset ({e}), starting fresh[/yellow]")
+        existing_rows = []
+
+    # Combine existing and new rows
+    combined_rows = existing_rows + all_new_rows
+    console_print(f"[green]📊 Combined dataset: {len(existing_rows)} existing + {len(all_new_rows)} new = {len(combined_rows)} total rows[/green]")
+
+    # Create and save the combined dataset
+    pds = Dataset.from_list(combined_rows)
+
+    # Save to disk
+    output_path = args.output_dataset.replace("/", "_")
+    pds.save_to_disk(output_path)
+    console_print(f"[green]💾 Saved combined dataset to disk: {output_path}[/green]")
+
+    if args.push:
+        console_print(f"[blue]🚀 Pushing to HuggingFace Hub: {args.output_dataset}[/blue]")
+        pds.push_to_hub(args.output_dataset)
+        console_print(f"[green]✅ Successfully pushed to Hub[/green]")
+
+# Run the main async function
+asyncio.run(extend_dataset(n_rows=args.n_rows, max_turns=args.max_turns, batch_size=args.batch_size))
 
