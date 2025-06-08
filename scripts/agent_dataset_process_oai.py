@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 from enum import Enum
 
 from datasets import Dataset, load_dataset, load_from_disk
@@ -81,10 +81,20 @@ class Args:
 
 args = sp.parse(Args)
 
+# Global placeholder for the reporter instance (populated by DatasetProcessor)
+_GLOBAL_CONSOLE_REPORTER: "ConsoleReporter | None" = None
+
 def console_print(text, verbose_only=args.verbose, **kwargs):
-    """Helper function to handle verbose printing"""
-    if not verbose_only or args.verbose:
-        console.print(text, **kwargs)
+    """Helper function that delegates to the active ConsoleReporter (if any)."""
+    global _GLOBAL_CONSOLE_REPORTER  # noqa: PLW0603 – needed for global mutation
+
+    reporter = _GLOBAL_CONSOLE_REPORTER
+    if reporter is not None:
+        reporter.print(text, verbose_only=verbose_only, **kwargs)
+    else:
+        # Fallback to raw rich.console when no reporter is available (e.g. unit tests)
+        if not verbose_only or args.verbose:
+            console.print(text, **kwargs)
 
 def load_ds(dataset_name, init=True):
     if init:
@@ -140,14 +150,7 @@ def get_current_cookbook() -> str:
 # Global error collection for batch analysis
 collected_errors = []
 
-# Row counter for init mode
-current_row_index = 0
-
-def reset_global_state():
-    """Reset global state for clean execution"""
-    global collected_errors, current_row_index
-    collected_errors.clear()
-    current_row_index = 0
+# No row index tracking required now that init-mode is gone
 
 def recreate_triton_agent():
     """Recreate triton agent with updated cookbook content"""
@@ -701,223 +704,219 @@ def unpack_row(row: dict):
             unpacked_data[key] = value
     return unpacked_data
 
-@weave.op
-async def generate_row(max_turns: int, function_name: str = None, function_description: str = None, existing_row: dict = None):
-    global current_row_index
-    
-    # Create unified context
-    context = ExecutionContext()
-    
+# ---------------------------------------------------------------------------
+# Generation helpers to shrink the massive `generate_row` coroutine
+# ---------------------------------------------------------------------------
+
+async def _create_execution_context(
+    *,
+    max_turns: int,
+    existing_row: dict | None = None,
+    function_name: str | None = None,
+    function_description: str | None = None,
+):
+    """Prepare an `ExecutionContext` according to the current run‐mode.
+
+    Returns a tuple of (context, pt_code, tests, pt_entrypoint) where the latter
+    three are *None* until the PyTorch phase runs (unless we are in fix-mode and
+    the row already contains them).
+    """
+    ctx = ExecutionContext()
+
+    # ----------------------------------------------------
+    # 1. Fix-mode – hydrate from existing row
+    # ----------------------------------------------------
     if args.fix and existing_row:
-        # Fix mode: load existing row data into context
-        context.function_name = existing_row.get("function_name", "")
-        context.function_description = existing_row.get("function_description", "")
-        
-        # Load existing PyTorch data
-        context.pt_code = existing_row.get("pt_code", "")
-        context.tests = existing_row.get("tests", "")
-        context.pt_entrypoint = existing_row.get("pt_entrypoint", "")
-        context.pt_runs = existing_row.get("pt_runs", False)
-        context.pt_stdout = existing_row.get("pt_stdout", "")
-        context.pt_stderr = existing_row.get("pt_stderr", "")
-        context.pt_returncode = existing_row.get("pt_returncode", -1)
-        context.pt_has_output = existing_row.get("pt_has_output", False)
-        context.pt_error_summary = existing_row.get("pt_error_summary", "")
-        
-        # Also load existing Triton data (will be overwritten)
-        context.triton_code = existing_row.get("triton_code", "")
-        context.triton_entrypoint = existing_row.get("triton_entrypoint", "")
-        context.triton_runs = existing_row.get("triton_runs", False)
-        context.triton_stdout = existing_row.get("triton_stdout", "")
-        context.triton_stderr = existing_row.get("triton_stderr", "")
-        context.triton_returncode = existing_row.get("triton_returncode", -1)
-        context.triton_has_output = existing_row.get("triton_has_output", False)
-        context.triton_error_summary = existing_row.get("triton_error_summary", "")
-        context.triton_is_correct = existing_row.get("triton_is_correct", False)
-        
+        ctx.function_name = existing_row.get("function_name", "")
+        ctx.function_description = existing_row.get("function_description", "")
+
+        # Copy PyTorch fields
+        for key in (
+            "pt_code",
+            "tests",
+            "pt_entrypoint",
+            "pt_runs",
+            "pt_stdout",
+            "pt_stderr",
+            "pt_returncode",
+            "pt_has_output",
+            "pt_error_summary",
+        ):
+            setattr(ctx, key, existing_row.get(key, getattr(ctx, key)))
+
+        # Copy Triton fields we might look at later (they will be overwritten)
+        for key in (
+            "triton_code",
+            "triton_entrypoint",
+            "triton_runs",
+            "triton_stdout",
+            "triton_stderr",
+            "triton_returncode",
+            "triton_has_output",
+            "triton_error_summary",
+            "triton_is_correct",
+        ):
+            setattr(ctx, key, existing_row.get(key, getattr(ctx, key)))
+
         console_print(Panel(
-            f"[bold magenta]🔧 Fixing: {context.function_name}[/bold magenta]\n"
-            f"[dim]{context.function_description}[/dim]\n"
-            f"[yellow]PyTorch: {'✅ Working' if context.pt_runs else '❌ Failed'}[/yellow]\n"
-            f"[blue]Triton: {'✅ Correct' if context.triton_is_correct else '❌ Needs Fix'}[/blue]",
+            f"[bold magenta]🔧 Fixing: {ctx.function_name}[/bold magenta]\n"
+            f"[dim]{ctx.function_description}[/dim]\n"
+            f"[yellow]PyTorch: {'✅ Working' if ctx.pt_runs else '❌ Failed'}[/yellow]\n"
+            f"[blue]Triton: {'✅ Correct' if ctx.triton_is_correct else '❌ Needs Fix'}[/blue]",
             title="Fix Mode",
-            border_style="magenta"
+            border_style="magenta",
         ))
-        
-        # Extract PyTorch info for Triton agent
-        pt_code = context.pt_code
-        tests = context.tests
-        pt_entrypoint = context.pt_entrypoint
-        
-    elif args.init:
-        # Use existing sample from the dataset
-        if current_row_index >= len(input_ds):
-            raise IndexError(f"Row index {current_row_index} out of range for dataset with {len(input_ds)} samples")
-        
-        sample = input_ds[current_row_index]
-        context.function_name = sample[args.entrypoint]
-        context.function_description = sample[args.description]
-        
-        # Update pt_code in context if available
-        if 'pt_code' in sample:
-            context.pt_code = sample['pt_code']
-        
-        current_row_index += 1
-        
-        console_print(Panel(
-            f"[bold cyan]🔄 Using existing sample: {context.function_name}[/bold cyan]\n"
-            f"[dim]{context.function_description}[/dim]",
-            title="Using Existing Sample",
-            border_style="cyan"
-        ))
-    else:
-        # Use pre-generated function info
-        context.function_name = function_name
-        context.function_description = function_description
-        
-        console_print(Panel(
-            f"[bold cyan]🚀 Generating: {context.function_name}[/bold cyan]\n"
-            f"[dim]{context.function_description}[/dim]",
-            title="Function Generation",
-            border_style="cyan"
-        ))
-    
-    try:
-        # Run PyTorch agent only if not in fix mode (since PyTorch already works in fix mode)
-        if not args.fix:
-            # Run PyTorch agent (will handoff to pt_output_agent to extract code, tests, and entrypoint)
-            console_print(f"[yellow]📝 Running PyTorch agent...[/yellow]")
-                
-            pt_result = await Runner.run(
-                starting_agent=pt_agent,
-                input=pytorch_generation_user_prompt.format(
-                    function_name=context.function_name,
-                    function_description=context.function_description
-                ),
-                context=context,
-                max_turns=max_turns
+        return ctx, ctx.pt_code, ctx.tests, ctx.pt_entrypoint
+
+    # ----------------------------------------------------
+    # 3. Fresh generation
+    # ----------------------------------------------------
+    ctx.function_name = function_name or ""
+    ctx.function_description = function_description or ""
+
+    console_print(Panel(
+        f"[bold cyan]🚀 Generating: {ctx.function_name}[/bold cyan]\n"
+        f"[dim]{ctx.function_description}[/dim]",
+        title="Function Generation",
+        border_style="cyan",
+    ))
+    return ctx, None, None, None
+
+
+async def _run_pytorch_phase(ctx: ExecutionContext, max_turns: int, skip: bool = False):
+    """Run the PyTorch agent unless `skip` is True (used by fix-mode)."""
+    if skip:
+        # We already possess a verified PyTorch implementation.
+        return ctx.pt_code, ctx.tests, ctx.pt_entrypoint
+
+    console_print("[yellow]📝 Running PyTorch agent...[/yellow]")
+    pt_result = await Runner.run(
+        starting_agent=pt_agent,
+        input=pytorch_generation_user_prompt.format(
+            function_name=ctx.function_name,
+            function_description=ctx.function_description,
+        ),
+        context=ctx,
+        max_turns=max_turns,
+    )
+    pt_output = pt_result.final_output
+
+    # Handle both structured and fallback cases
+    if isinstance(pt_output, PytorchOutput):
+        console_print(
+            Panel(
+                f"[green]✅ PyTorch agent succeeded[/green] — entrypoint: {pt_output.pt_entrypoint}",
+                title="🔍 PyTorch Analysis",
+                border_style="yellow",
             )
-            
-            # Extract PyTorch code info from structured output
-            pt_output = pt_result.final_output
-            
-            # Debug: Check what we got
-            pt_analysis = f"Type: {type(pt_output)}"
-            
-            if isinstance(pt_output, str):
-                pt_analysis += f"\n[red]❌ Got string instead of PytorchOutput[/red]"
-                pt_analysis += f"\n[dim]Preview: {pt_output[:100]}{'...' if len(pt_output) > 100 else ''}[/dim]"
-                # Fallback: extract from context instead
-                pt_code = context.pt_code
-                tests = context.tests  
-                pt_entrypoint = context.function_name  # fallback to function name
-            else:
-                pt_analysis += f"\n[green]✅ Got PytorchOutput successfully[/green]"
-                pt_analysis += f"\nEntrypoint: {pt_output.pt_entrypoint}"
-                pt_analysis += f"\nCode length: {len(pt_output.pt_code)} chars"
-                pt_analysis += f"\nTests length: {len(pt_output.tests)} chars"
-                pt_code = pt_output.pt_code
-                tests = pt_output.tests
-                pt_entrypoint = pt_output.pt_entrypoint
-            
-            console_print(Panel(pt_analysis, title="🔍 PyTorch Analysis", border_style="yellow"))
-        
-        # Run Triton agent (will handoff to triton_output_agent to extract code, reasoning, and entrypoint)
-        console_print(f"[blue]⚡ Running Triton agent...[/blue]")
-            
-        triton_result = await Runner.run(
-            starting_agent=triton_agent,
-            input=triton_generation_user_prompt.format(
-                pt_code=pt_code,
-                entrypoint=pt_entrypoint
-            ),
-            context=context,
-            max_turns=max_turns
         )
-        
-        # Extract Triton code info from structured output
-        triton_output = triton_result.final_output
-        
-        # Debug: Check what we got
-        triton_analysis = f"Type: {type(triton_output)}"
-        
-        if isinstance(triton_output, str):
-            triton_analysis += f"\n[red]❌ Got string instead of TritonOutput[/red]"
-            triton_analysis += f"\n[dim]Preview: {triton_output[:100]}{'...' if len(triton_output) > 100 else ''}[/dim]"
-            # Fallback: extract from context instead
-            triton_code = context.triton_code
-            conversion_reasoning = "Conversion reasoning not captured due to parsing issue"
-            triton_entrypoint = pt_entrypoint  # fallback to same as pytorch
-        else:
-            triton_analysis += f"\n[green]✅ Got TritonOutput successfully[/green]"
-            triton_analysis += f"\nEntrypoint: {triton_output.triton_entrypoint}"
-            triton_analysis += f"\nCode length: {len(triton_output.triton_code)} chars"
-            triton_analysis += f"\nReasoning length: {len(triton_output.conversion_reasoning)} chars"
+        return pt_output.pt_code, pt_output.tests, pt_output.pt_entrypoint
+    else:
+        preview = str(pt_output)[:100]
+        console_print(
+            Panel(
+                f"[red]❌ Unexpected PyTorch output type ({type(pt_output)}). Using context fallback.\n[/red]Preview: {preview}",
+                title="🔍 PyTorch Analysis",
+                border_style="yellow",
+            )
+        )
+        return ctx.pt_code, ctx.tests, ctx.function_name  # fallback
+
+
+async def _run_triton_phase(ctx: ExecutionContext, pt_code: str, pt_entrypoint: str, max_turns: int):
+    """Invoke Triton agent and return (triton_code, reasoning, entrypoint, triton_output)."""
+    console_print("[blue]⚡ Running Triton agent...[/blue]")
+
+    triton_result = await Runner.run(
+        starting_agent=triton_agent,
+        input=triton_generation_user_prompt.format(pt_code=pt_code, entrypoint=pt_entrypoint),
+        context=ctx,
+        max_turns=max_turns,
+    )
+    return triton_result.final_output
+
+
+# ---------------------------------------------------------------------------
+# END helper section
+# ---------------------------------------------------------------------------
+
+async def generate_row(max_turns: int, function_name: str | None = None, function_description: str | None = None, existing_row: dict | None = None):
+    """Smaller orchestrator that delegates heavy work to helper functions."""
+    # ---------------------------------------------------------------------
+    # 1. Prepare context depending on mode
+    # ---------------------------------------------------------------------
+    context, pt_code, tests, pt_entrypoint = await _create_execution_context(
+        max_turns=max_turns,
+        existing_row=existing_row,
+        function_name=function_name,
+        function_description=function_description,
+    )
+
+    try:
+        # -----------------------------------------------------------------
+        # 2. PyTorch phase (skipped in fix-mode)
+        # -----------------------------------------------------------------
+        skip_pt = args.fix  # Fix-mode means we skip PyTorch generation
+        pt_code, tests, pt_entrypoint = await _run_pytorch_phase(context, max_turns, skip_pt)
+
+        # -----------------------------------------------------------------
+        # 3. Triton phase
+        # -----------------------------------------------------------------
+        triton_output = await _run_triton_phase(context, pt_code, pt_entrypoint, max_turns)
+
+        if isinstance(triton_output, TritonOutput):
             triton_code = triton_output.triton_code
             conversion_reasoning = triton_output.conversion_reasoning
             triton_entrypoint = triton_output.triton_entrypoint
-        
-        console_print(Panel(triton_analysis, title="🔍 Triton Analysis", border_style="blue"))
-        
-        # Collect error information for batch analysis if triton failed
+        else:
+            triton_code = context.triton_code
+            conversion_reasoning = "Conversion reasoning not captured due to parsing issue"
+            triton_entrypoint = pt_entrypoint
+
+        # Collect error info if Triton failed
         if not context.triton_runs and context.triton_stderr:
-            error_info = ErrorContext(
-                function_name=context.function_name,
-                function_description=context.function_description,
-                pt_code=pt_code,
-                triton_code=triton_code,
-                triton_error_summary=context.triton_error_summary,
-                triton_stderr=context.triton_stderr,
-                conversion_reasoning=conversion_reasoning
+            collected_errors.append(
+                ErrorContext(
+                    function_name=context.function_name,
+                    function_description=context.function_description,
+                    pt_code=pt_code,
+                    triton_code=triton_code,
+                    triton_error_summary=context.triton_error_summary,
+                    triton_stderr=context.triton_stderr,
+                    conversion_reasoning=conversion_reasoning,
+                )
             )
-            collected_errors.append(error_info)
-            console_print(f"[yellow]📝 Collected error for batch analysis ({len(collected_errors)} total)[/yellow]")
-        
-        # Show execution summary
-        summary = f"PyTorch runs: {'✅' if context.pt_runs else '❌'}"
-        summary += f"\nTriton runs: {'✅' if context.triton_runs else '❌'}"
-        summary += f"\nTriton correct: {'✅' if context.triton_is_correct else '❌'}"
-        if context.pt_stderr:
-            summary += f"\nPyTorch errors: {len(context.pt_stderr)} chars"
-        if context.triton_stderr:
-            summary += f"\nTriton errors: {len(context.triton_stderr)} chars"
-        
-        console_print(Panel(summary, title="📊 Execution Summary", border_style="magenta"))
-        
-        # Start with the flat context data (contains all execution details: stdout, stderr, runs, etc.)
-        row_data = context.to_flat_dict()
-        
-        # Add the structured output data manually
-        row_data.update({
+
+        # -----------------------------------------------------------------
+        # 4. Build flat row data
+        # -----------------------------------------------------------------
+        row_data = context.to_flat_dict() | {
             "pt_code": pt_code,
             "tests": tests,
             "pt_entrypoint": pt_entrypoint,
             "triton_code": triton_code,
             "conversion_reasoning": conversion_reasoning,
-            "triton_entrypoint": triton_entrypoint
-        })
-        
-        fix_status = " (FIXED)" if args.fix and context.triton_is_correct else ""
-        console_print(Panel(
-            f"[green]🎉 Successfully {'fixed' if args.fix else 'generated'} row for {context.function_name}{fix_status}[/green]",
-            title="Success",
-            border_style="green"
-        ))
-        
-        # Ensure the final result is completely flat
+            "triton_entrypoint": triton_entrypoint,
+        }
+
+        console_print(
+            Panel(
+                "[green]🎉 Row processed successfully[/green]",
+                title="Success",
+                border_style="green",
+            )
+        )
         return unpack_row(row_data)
-        
-    except Exception as e:
-        error_msg = f"Error {'fixing' if args.fix else 'generating'} row for {context.function_name}: {str(e)}"
-        console_print(Panel(f"[bold red]💥 {error_msg}[/bold red]", title="Error", border_style="red"))
-        console_print(f"[red]❌ {error_msg}[/red]", verbose_only=False)  # Always show brief error
-        
-        if args.verbose:
-            import traceback
-            console_print(f"[red]Traceback: {traceback.format_exc()}[/red]")
-        
-        raise e
-        return None
+
+    except Exception as exc:
+        console_print(
+            Panel(
+                f"[bold red]💥 Error processing row: {exc}[/bold red]",
+                title="Error",
+                border_style="red",
+            )
+        )
+        raise
 
 @weave.op
 async def generate_new_functions_parallel(n_rows: int, max_turns: int):
@@ -979,9 +978,6 @@ async def generate_fix_rows_parallel(rows_to_fix: list, max_turns: int):
 
 @weave.op
 async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
-    global current_row_index
-    current_row_index = 0  # Reset counter
-    
     if args.fix and rows_to_fix is not None:
         # Fix mode: work on existing rows that need fixing
         console_print(Panel(
@@ -992,29 +988,6 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
         
         pds_list = await generate_fix_rows_parallel(rows_to_fix, max_turns)
         
-    elif args.init:
-        # Init mode: use existing dataset samples
-        console_print(Panel(
-            f"[bold blue]🔄 Generating {n_rows} rows with max {max_turns} turns each[/bold blue]",
-            title="Processing Configuration",
-            border_style="blue"
-        ))
-        
-        # Limit to available samples
-        available_samples = len(input_ds)
-        if n_rows > available_samples:
-            console_print(f"[yellow]⚠️ Requested {n_rows} rows but only {available_samples} samples available. Using all available samples.[/yellow]")
-            n_rows = available_samples
-        
-        console_print(f"[blue]📋 Using existing dataset samples[/blue]")
-        
-        # For init mode, just create tasks directly
-        tasks = []
-        for i in range(n_rows):
-            console_print(f"[dim]Starting row {i+1}/{n_rows}...[/dim]")
-            tasks.append(generate_row(max_turns=max_turns))
-        
-        pds_list = await asyncio.gather(*tasks, return_exceptions=True)
     else:
         # Generation mode: create new functions
         console_print(Panel(
@@ -1032,8 +1005,6 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
     # Results summary
     if args.fix:
         mode_desc = "fixed rows"
-    elif args.init:
-        mode_desc = "existing samples"
     else:
         mode_desc = "generated functions"
         
@@ -1058,27 +1029,8 @@ async def analyze_errors_and_improve_cookbook():
         border_style="blue"
     ))
     
-    # Format error details for the prompt
-    error_details_list = []
-    for i, error in enumerate(collected_errors, 1):
-        error_detail = f"""
-**Error {i}: {error.function_name}**
-- **Description:** {error.function_description}
-- **PyTorch Code:**
-```python
-{error.pt_code}
-```
-- **Triton Code (failed):**
-```python
-{error.triton_code}
-```
-- **Error Message:** {error.triton_error_summary}
-- **Conversion Reasoning:** {error.conversion_reasoning}
-- **Stderr:** {error.triton_stderr[:300]}{'...' if len(error.triton_stderr) > 300 else ''}
-"""
-        error_details_list.append(error_detail)
-    
-    error_details = "\n".join(error_details_list)
+    # Build markdown summary for LLM
+    error_details = _format_error_details(collected_errors)
     current_cookbook = get_current_cookbook()
     
     try:
@@ -1100,30 +1052,13 @@ async def analyze_errors_and_improve_cookbook():
         # Process the result
         cookbook_update = error_result.final_output
         
+        _display_cookbook_update(cookbook_update)
+        
+        # If cookbook changed, refresh the agent
         if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
-            console_print(Panel(
-                f"[green]📚 Cookbook improvement recommended![/green]\n"
-                f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]\n"
-                f"[bold]Key Improvements:[/bold]\n" + 
-                "\n".join([f"• {improvement}" for improvement in cookbook_update.key_improvements[:3]]),
-                title="Cookbook Analysis Complete",
-                border_style="green"
-            ))
-            
-            # The improved cookbook will be updated via the tool call that was made during agent execution
-            console_print(f"[green]✅ Cookbook has been updated with improvements based on {len(collected_errors)} errors[/green]")
-            
-            # Recreate triton agent with updated cookbook
+            console_print("[green]✅ Cookbook has been updated with improvements.[/green]")
             recreate_triton_agent()
-            
-        else:
-            console_print(Panel(
-                f"[yellow]📚 No cookbook improvement needed[/yellow]\n"
-                f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]",
-                title="Cookbook Analysis Complete", 
-                border_style="yellow"
-            ))
-            
+
     except Exception as e:
         console_print(Panel(
             f"[red]❌ Error during batch cookbook analysis: {str(e)}[/red]",
@@ -1150,154 +1085,327 @@ def save_and_push_dataset(dataset_rows: list, batch_info: str = ""):
         pds.push_to_hub(args.output_dataset)
         console_print(f"[green]✅ Successfully pushed to Hub{batch_info}[/green]")
 
-@weave.op
-async def extend_dataset(n_rows: int, max_turns: int, batch_size: int):
-    """Main async function to handle batch processing"""
-    # Reset global state for clean execution
-    reset_global_state()
-    
-    # Load existing dataset first
+# ---------------------------------------------------------------------------
+# Dataset-level helper functions (to shrink `extend_dataset`)
+# ---------------------------------------------------------------------------
+
+def _load_existing_dataset() -> list:
+    """Return the existing dataset rows (or empty list if unavailable)."""
     try:
         console_print(f"[yellow]📚 Loading existing dataset: {args.input_dataset}[/yellow]")
         existing_ds = load_ds(args.input_dataset, init=False)
-        all_rows = list(existing_ds)
-        console_print(f"[blue]📋 Starting with {len(all_rows)} existing rows[/blue]")
-    except Exception as e:
+        rows = list(existing_ds)
+        console_print(f"[blue]📋 Loaded {len(rows)} existing rows[/blue]")
+        return rows
+    except Exception as exc:
         if args.fix:
-            console_print(f"[red]❌ Cannot load dataset for fix mode: {e}[/red]")
-            return
-        console_print(f"[yellow]⚠️ Could not load existing dataset ({e}), starting fresh[/yellow]")
-        all_rows = []
-    
-    if args.fix:
-        # Fix mode: find rows that need fixing and process them
-        rows_to_fix = filter_rows_needing_fix(all_rows)
-        
+            console_print(f"[red]❌ Cannot load dataset for fix mode: {exc}[/red]")
+            raise
+        console_print(f"[yellow]⚠️ Could not load existing dataset ({exc}); starting fresh.[/yellow]")
+        return []
+
+
+async def _process_fix_batches(all_rows: list, rows_to_fix: list, batch_size: int, max_turns: int):
+    """Iterate over batches of rows_to_fix, updating all_rows in-place."""
+    total_batches = (len(rows_to_fix) + batch_size - 1) // batch_size
+    total_fixed_rows = 0
+
+    console_print(Panel(
+        f"[bold magenta]🔧 Processing {len(rows_to_fix)} rows to fix in {total_batches} batches of {batch_size}[/bold magenta]",
+        title="Fix Batch Processing Configuration",
+        border_style="magenta",
+    ))
+
+    for batch_idx in range(total_batches):
+        start, end = batch_idx * batch_size, min((batch_idx + 1) * batch_size, len(rows_to_fix))
+        batch_rows = rows_to_fix[start:end]
         console_print(Panel(
-            f"[bold magenta]🔧 Fix Mode Analysis[/bold magenta]\n"
-            f"[blue]Total rows: {len(all_rows)}[/blue]\n"
-            f"[yellow]Rows needing fix (pt_runs=True, triton_is_correct=False): {len(rows_to_fix)}[/yellow]\n"
-            f"[green]Rows already working: {len(all_rows) - len(rows_to_fix)}[/green]",
-            title="Fix Mode Analysis",
-            border_style="magenta"
+            f"[bold magenta]🔧 Fix batch {batch_idx + 1}/{total_batches} – size {len(batch_rows)}[/bold magenta]",
+            title=f"Fix Batch {batch_idx + 1}",
+            border_style="magenta",
         ))
-        
-        if not rows_to_fix:
-            console_print(Panel(
-                "[green]🎉 No rows need fixing! All Triton conversions are already correct.[/green]",
-                title="Nothing to Fix",
-                border_style="green"
-            ))
-            return
-        
-        # Process fixes in batches
-        total_batches = (len(rows_to_fix) + batch_size - 1) // batch_size  # Ceiling division
-        total_fixed_rows = 0
-        
-        console.print(Panel(
-            f"[bold magenta]🔧 Processing {len(rows_to_fix)} rows to fix in {total_batches} batches of {batch_size}[/bold magenta]",
-            title="Fix Batch Processing Configuration",
-            border_style="magenta"
+
+        fixed_rows = await generate_rows(n_rows=len(batch_rows), max_turns=max_turns, rows_to_fix=batch_rows)
+
+        # Merge back into all_rows
+        for original_row, fixed_row in zip(batch_rows, fixed_rows):
+            if fixed_row is None or isinstance(fixed_row, Exception):
+                continue
+            for i, r in enumerate(all_rows):
+                if (
+                    r.get("function_name") == original_row.get("function_name")
+                    and r.get("function_description") == original_row.get("function_description")
+                ):
+                    all_rows[i] = fixed_row
+                    break
+
+        total_fixed_rows += len([r for r in fixed_rows if r is not None and not isinstance(r, Exception)])
+        console_print(f"[green]✅ Batch {batch_idx + 1} fixed {len(fixed_rows)} rows[/green]")
+
+        # Post-batch housekeeping
+        await analyze_errors_and_improve_cookbook()
+        save_and_push_dataset(all_rows, f" (after fix batch {batch_idx + 1}/{total_batches})")
+
+    console_print(Panel(
+        f"[bold green]🎉 Fix complete – {total_fixed_rows}/{len(rows_to_fix)} rows fixed.[/bold green]",
+        title="Fix Complete",
+        border_style="green",
+    ))
+
+
+async def _process_generation_batches(all_rows: list, n_rows: int, batch_size: int, max_turns: int):
+    """Generate new rows in batches and append to all_rows."""
+    total_batches = (n_rows + batch_size - 1) // batch_size
+    total_new = 0
+
+    console_print(Panel(
+        f"[bold blue]🚀 Processing {n_rows} rows in {total_batches} batches of {batch_size}[/bold blue]",
+        title="Generation Batches",
+        border_style="blue",
+    ))
+
+    for batch_idx in range(total_batches):
+        current_size = min(batch_size, n_rows - batch_idx * batch_size)
+        console_print(Panel(
+            f"[bold cyan]📦 Gen batch {batch_idx + 1}/{total_batches} – size {current_size}[/bold cyan]",
+            title=f"Batch {batch_idx + 1}",
+            border_style="cyan",
         ))
-        
-        # Create a mapping from original indices to rows for easier updating
-        row_index_map = {}
-        for i, row in enumerate(all_rows):
-            if row in rows_to_fix:
-                row_index_map[id(row)] = i
-        
-        for batch_idx in range(total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(rows_to_fix))
-            current_batch_rows = rows_to_fix[start_idx:end_idx]
-            current_batch_size = len(current_batch_rows)
-            
-            console_print(Panel(
-                f"[bold magenta]🔧 Processing fix batch {batch_idx + 1}/{total_batches} ({current_batch_size} rows)[/bold magenta]",
-                title=f"Fix Batch {batch_idx + 1}",
-                border_style="magenta"
-            ))
-            
-            fixed_rows = await generate_rows(n_rows=current_batch_size, max_turns=max_turns, rows_to_fix=current_batch_rows)
-            
-            # Update the original dataset with fixed rows
-            for original_row, fixed_row in zip(current_batch_rows, fixed_rows):
-                if fixed_row is not None and not isinstance(fixed_row, Exception):
-                    # Find the index of the original row in all_rows and update it
-                    for i, dataset_row in enumerate(all_rows):
-                        if (dataset_row.get("function_name") == original_row.get("function_name") and 
-                            dataset_row.get("function_description") == original_row.get("function_description")):
-                            all_rows[i] = fixed_row
-                            break
-            
-            total_fixed_rows += len([r for r in fixed_rows if r is not None and not isinstance(r, Exception)])
-            
-            console_print(f"[green]✅ Fix batch {batch_idx + 1} completed: {len(fixed_rows)} rows processed[/green]")
-            console_print(f"[blue]📊 Total rows fixed so far: {total_fixed_rows}/{len(rows_to_fix)}[/blue]")
-            
-            # Analyze errors and improve cookbook after each batch
+        batch_rows = await generate_rows(n_rows=current_size, max_turns=max_turns)
+        all_rows.extend(batch_rows)
+        total_new += len(batch_rows)
+
+        await analyze_errors_and_improve_cookbook()
+        save_and_push_dataset(all_rows, f" (after gen batch {batch_idx + 1}/{total_batches})")
+
+    console_print(Panel(
+        f"[bold green]🎉 Generation complete – added {total_new} new rows.[/bold green]",
+        title="Generation Complete",
+        border_style="green",
+    ))
+
+# ============================================================================
+# UTILITY CLASSES (ConsoleReporter) and MAIN PROCESSOR (DatasetProcessor)
+# ============================================================================
+
+class ConsoleReporter:
+    """Thin wrapper around rich.Console to centralise verbosity handling."""
+    def __init__(self, console: Console, verbose: bool = False):
+        self._console = console
+        self.verbose = verbose
+
+    def print(self, *args, verbose_only: bool = False, **kwargs):
+        if (not verbose_only) or self.verbose:
+            self._console.print(*args, **kwargs)
+
+    def panel(self, content: str, title: str = "", style: str = "blue"):
+        self.print(Panel(content, title=title, border_style=style))
+
+
+class DatasetProcessor:
+    """Encapsulates the full dataset-generation workflow to avoid globals."""
+
+    def __init__(self, args: Args):
+        # Keep a reference to the original global *args* so that legacy helpers
+        # still work.  In a later clean-up pass we can thread *args* explicitly
+        # everywhere and delete the global, but for now we just mirror it so the
+        # rest of the file keeps functioning unchanged.
+        globals()["args"] = args  # noqa: SPL001 – intentional global write
+        self.args = args
+        self.console = ConsoleReporter(console, verbose=args.verbose)
+        # Make the reporter globally discoverable for legacy helper functions.
+        global _GLOBAL_CONSOLE_REPORTER  # noqa: PLW0603 – global mutation by design
+        _GLOBAL_CONSOLE_REPORTER = self.console
+
+        # Replace the legacy global error list with an instance attribute while
+        # keeping backward compatibility for code that still references the
+        # global name.
+        self.collected_errors: list[ErrorContext] = []
+        globals()["collected_errors"] = self.collected_errors  # type: ignore
+
+        # Expose this processor for helper wrappers that live at module scope.
+        globals()["_GLOBAL_DATASET_PROCESSOR"] = self  # type: ignore
+
+    async def run(self):
+        """Entry-point that simply forwards to the existing *extend_dataset* op."""
+        # Reset any global state that previous runs might have left behind
+        self.reset_state()
+
+        # All heavy lifting is still performed by the pre-existing async
+        # function.  Once that function is fully migrated into the class we can
+        # delete this indirection.
+        await process_dataset(
+            mode="fix" if self.args.fix else "generate",
+            n_rows=self.args.n_rows,
+            batch_size=self.args.batch_size,
+            max_turns=self.args.max_turns,
+        )
+
+    # ---------------------------------------------------------------------
+    # Interim compatibility helpers – these still mutate the legacy globals,
+    # but wrap them behind an instance-level convenience API so that callers
+    # don't need to import the globals directly any more.  In a later pass we
+    # will refactor the downstream functions to use these attributes instead
+    # and then remove the globals entirely.
+    # ---------------------------------------------------------------------
+
+    @staticmethod
+    def reset_state():
+        """Clear legacy global state for a clean execution."""
+        global collected_errors  # noqa: PLW0603
+        collected_errors.clear()
+
+    # ------------------------------------------------------------------
+    # Batch-processing helpers (formerly module-level)
+    # ------------------------------------------------------------------
+
+    async def process_fix_batches(self, all_rows: list, rows_to_fix: list, batch_size: int, max_turns: int):
+        total_batches = (len(rows_to_fix) + batch_size - 1) // batch_size
+        total_fixed = 0
+
+        self.console.panel(
+            f"🔧 Processing {len(rows_to_fix)} rows to fix in {total_batches} batches of {batch_size}",
+            title="Fix Batches",
+            style="magenta",
+        )
+
+        for idx in range(total_batches):
+            batch = rows_to_fix[idx * batch_size : (idx + 1) * batch_size]
+            self.console.panel(
+                f"🔧 Fix batch {idx + 1}/{total_batches} – size {len(batch)}",
+                title=f"Fix Batch {idx + 1}",
+                style="magenta",
+            )
+
+            fixed_rows = await generate_rows(n_rows=len(batch), max_turns=max_turns, rows_to_fix=batch)
+
+            # Merge results
+            for orig, fixed in zip(batch, fixed_rows):
+                if fixed is None or isinstance(fixed, Exception):
+                    continue
+                for i, row in enumerate(all_rows):
+                    if row.get("function_name") == orig.get("function_name") and row.get("function_description") == orig.get("function_description"):
+                        all_rows[i] = fixed
+                        break
+
+            total_fixed += len([r for r in fixed_rows if r is not None and not isinstance(r, Exception)])
+
             await analyze_errors_and_improve_cookbook()
-            
-            # Save and push after each batch
-            batch_info = f" (after fix batch {batch_idx + 1}/{total_batches})"
-            save_and_push_dataset(all_rows, batch_info)
-        
-        console.print(Panel(
-            f"[bold green]🎉 Fix complete![/bold green]\n"
-            f"[green]📊 Fixed {total_fixed_rows}/{len(rows_to_fix)} rows[/green]\n"
-            f"[blue]📋 Final dataset: {len(all_rows)} total rows[/blue]",
-            title="Fix Complete",
-            border_style="green"
-        ))
-        
-    else:
-        # Regular generation mode
-        total_batches = (n_rows + batch_size - 1) // batch_size  # Ceiling division
-        total_new_rows = 0
+            save_and_push_dataset(all_rows, f" (after fix batch {idx + 1}/{total_batches})")
 
-        console.print(Panel(
-            f"[bold blue]🚀 Processing {n_rows} rows in {total_batches} batches of {batch_size}[/bold blue]",
-            title="Batch Processing Configuration",
-            border_style="blue"
-        ))
+        self.console.panel(f"🎉 Fix complete – {total_fixed}/{len(rows_to_fix)} rows fixed.", title="Fix Complete", style="green")
 
-        for batch_idx in range(total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, n_rows)
-            current_batch_size = end_idx - start_idx
-            
-            console_print(Panel(
-                f"[bold cyan]📦 Processing batch {batch_idx + 1}/{total_batches} ({current_batch_size} rows)[/bold cyan]",
-                title=f"Batch {batch_idx + 1}",
-                border_style="cyan"
-            ))
-            
-            batch_rows = await generate_rows(n_rows=current_batch_size, max_turns=max_turns)
-            
-            # Add batch results to the full dataset
+    async def process_generation_batches(self, all_rows: list, n_rows: int, batch_size: int, max_turns: int):
+        total_batches = (n_rows + batch_size - 1) // batch_size
+        total_new = 0
+
+        self.console.panel(
+            f"🚀 Generating {n_rows} rows in {total_batches} batches of {batch_size}",
+            title="Generation Batches",
+            style="blue",
+        )
+
+        for idx in range(total_batches):
+            size = min(batch_size, n_rows - idx * batch_size)
+            self.console.panel(
+                f"📦 Gen batch {idx + 1}/{total_batches} – size {size}",
+                title=f"Batch {idx + 1}",
+                style="cyan",
+            )
+            batch_rows = await generate_rows(n_rows=size, max_turns=max_turns)
             all_rows.extend(batch_rows)
-            total_new_rows += len(batch_rows)
-            
-            console_print(f"[green]✅ Batch {batch_idx + 1} completed: {len(batch_rows)} rows generated[/green]")
-            console_print(f"[blue]📊 Total rows: {len(all_rows)} ({total_new_rows} new + {len(all_rows) - total_new_rows} existing)[/blue]")
-            
-            # Analyze errors and improve cookbook after each batch
+            total_new += len(batch_rows)
+
             await analyze_errors_and_improve_cookbook()
-            
-            # Save and push after each batch
-            batch_info = f" (after batch {batch_idx + 1}/{total_batches})"
-            save_and_push_dataset(all_rows, batch_info)
+            save_and_push_dataset(all_rows, f" (after gen batch {idx + 1}/{total_batches})")
 
-        console.print(Panel(
-            f"[bold green]🎉 Generation complete![/bold green]\n"
-            f"[green]📊 Final dataset: {len(all_rows)} total rows ({total_new_rows} new rows added)[/green]",
-            title="Generation Complete",
-            border_style="green"
-        ))
+        self.console.panel(f"🎉 Generation complete – added {total_new} new rows.", title="Generation Complete", style="green")
 
-    # Final save to ensure everything is persisted
+# ---------------------------------------------------------------------------
+# Entry-point: instantiate the processor and launch the workflow.
+# ---------------------------------------------------------------------------
+
+@weave.op
+async def process_dataset(
+    mode: Literal["generate", "fix"],
+    n_rows: int = 200,
+    batch_size: int = 10,
+    max_turns: int = 20,
+):
+    """Unified entry-point for dataset processing.
+
+    mode="generate" → add `n_rows` new PyTorch/Triton pairs
+    mode="fix"      → retry Triton conversion on failing rows
+    """
+
+    DatasetProcessor.reset_state()
+
+    all_rows = _load_existing_dataset()
+
+    proc = globals().get("_GLOBAL_DATASET_PROCESSOR") or DatasetProcessor(args)
+
+    if mode == "fix":
+        rows_to_fix = filter_rows_needing_fix(all_rows)
+        if not rows_to_fix:
+            console_print(Panel("[green]🎉 Nothing to fix![/green]", title="Skip", border_style="green"))
+            return
+        await proc.process_fix_batches(all_rows, rows_to_fix, batch_size, max_turns)
+    else:
+        await proc.process_generation_batches(all_rows, n_rows, batch_size, max_turns)
+
     save_and_push_dataset(all_rows, " (final)")
 
-# Run the main async function
-asyncio.run(extend_dataset(n_rows=args.n_rows, max_turns=args.max_turns, batch_size=args.batch_size))
+# ---------------------------------------------------------------------------
+# Entry-point script execution
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    processor = DatasetProcessor(args)
+    asyncio.run(processor.run())
+
+# ---------------------------------------------------------------------------
+# Helper utilities for error reflection (extracted from monster function)
+# ---------------------------------------------------------------------------
+
+def _format_error_details(errors: list["ErrorContext"]) -> str:
+    """Build the markdown block summarising all collected errors."""
+    error_blocks: list[str] = []
+    for i, error in enumerate(errors, 1):
+        block = f"""
+**Error {i}: {error.function_name}**
+- **Description:** {error.function_description}
+- **PyTorch Code:**
+```python
+{error.pt_code}
+```
+- **Triton Code (failed):**
+```python
+{error.triton_code}
+```
+- **Error Message:** {error.triton_error_summary}
+- **Conversion Reasoning:** {error.conversion_reasoning}
+- **Stderr:** {error.triton_stderr[:300]}{'...' if len(error.triton_stderr) > 300 else ''}
+"""
+        error_blocks.append(block)
+    return "\n".join(error_blocks)
+
+
+def _display_cookbook_update(cookbook_update: "CookbookUpdate") -> None:
+    """Pretty-print the cookbook analysis result to the console."""
+    if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
+        console_print(Panel(
+            f"[green]📚 Cookbook improvement recommended![/green]\n"
+            f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]\n"
+            f"[bold]Key Improvements:[/bold]\n" +
+            "\n".join([f"• {imp}" for imp in cookbook_update.key_improvements[:3]]),
+            title="Cookbook Analysis Complete",
+            border_style="green",
+        ))
+    else:
+        console_print(Panel(
+            f"[yellow]📚 No cookbook improvement needed[/yellow]\n"
+            f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]",
+            title="Cookbook Analysis Complete",
+            border_style="yellow",
+        ))
 
