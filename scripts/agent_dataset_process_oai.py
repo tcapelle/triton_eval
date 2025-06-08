@@ -873,16 +873,16 @@ async def generate_row(max_turns: int, function_name: str | None = None, functio
             conversion_reasoning = "Conversion reasoning not captured due to parsing issue"
             triton_entrypoint = pt_entrypoint
 
-        # Collect error info if Triton failed
-        if not context.triton_runs and context.triton_stderr:
+        # Collect insight only when Triton implementation is correct
+        if context.triton_is_correct:
             collected_errors.append(
                 ErrorContext(
                     function_name=context.function_name,
                     function_description=context.function_description,
                     pt_code=pt_code,
                     triton_code=triton_code,
-                    triton_error_summary=context.triton_error_summary,
-                    triton_stderr=context.triton_stderr,
+                    triton_error_summary="",  # no error on success
+                    triton_stderr=context.triton_stdout,
                     conversion_reasoning=conversion_reasoning,
                 )
             )
@@ -1015,6 +1015,45 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
     console_print(Panel(result_text, title="📈 Final Results", border_style="green"))
     
     return successes
+
+# ---------------------------------------------------------------------------
+# Error reflection helpers (defined before first use)
+# ---------------------------------------------------------------------------
+
+def _format_error_details(errors: list["ErrorContext"]) -> str:
+    blocks: list[str] = []
+    for idx, err in enumerate(errors, 1):
+        blocks.append(
+            f"\n**Error {idx}: {err.function_name}**\n"
+            f"- **Description:** {err.function_description}\n"
+            f"- **PyTorch Code:**\n```python\n{err.pt_code}\n```\n"
+            f"- **Triton Code (failed):**\n```python\n{err.triton_code}\n```\n"
+            f"- **Error Message:** {err.triton_error_summary}\n"
+            f"- **Conversion Reasoning:** {err.conversion_reasoning}\n"
+            f"- **Stderr:** {err.triton_stderr[:300]}{'...' if len(err.triton_stderr) > 300 else ''}\n"
+        )
+    return "\n".join(blocks)
+
+
+def _display_cookbook_update(cookbook_update: "CookbookUpdate") -> None:
+    if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
+        console_print(Panel(
+            f"[green]📚 Cookbook improvement recommended![/green]\n"
+            f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]\n"
+            f"[bold]Key Improvements:[/bold]\n" + "\n".join(
+                [f"• {imp}" for imp in cookbook_update.key_improvements[:3]]
+            ),
+            title="Cookbook Analysis Complete",
+            border_style="green",
+        ))
+    else:
+        console_print(Panel(
+            f"[yellow]📚 No cookbook improvement needed[/yellow]\n"
+            f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]",
+            title="Cookbook Analysis Complete",
+            border_style="yellow",
+        ))
+
 
 @weave.op
 async def analyze_errors_and_improve_cookbook():
@@ -1362,50 +1401,4 @@ async def process_dataset(
 if __name__ == "__main__":
     processor = DatasetProcessor(args)
     asyncio.run(processor.run())
-
-# ---------------------------------------------------------------------------
-# Helper utilities for error reflection (extracted from monster function)
-# ---------------------------------------------------------------------------
-
-def _format_error_details(errors: list["ErrorContext"]) -> str:
-    """Build the markdown block summarising all collected errors."""
-    error_blocks: list[str] = []
-    for i, error in enumerate(errors, 1):
-        block = f"""
-**Error {i}: {error.function_name}**
-- **Description:** {error.function_description}
-- **PyTorch Code:**
-```python
-{error.pt_code}
-```
-- **Triton Code (failed):**
-```python
-{error.triton_code}
-```
-- **Error Message:** {error.triton_error_summary}
-- **Conversion Reasoning:** {error.conversion_reasoning}
-- **Stderr:** {error.triton_stderr[:300]}{'...' if len(error.triton_stderr) > 300 else ''}
-"""
-        error_blocks.append(block)
-    return "\n".join(error_blocks)
-
-
-def _display_cookbook_update(cookbook_update: "CookbookUpdate") -> None:
-    """Pretty-print the cookbook analysis result to the console."""
-    if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
-        console_print(Panel(
-            f"[green]📚 Cookbook improvement recommended![/green]\n"
-            f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]\n"
-            f"[bold]Key Improvements:[/bold]\n" +
-            "\n".join([f"• {imp}" for imp in cookbook_update.key_improvements[:3]]),
-            title="Cookbook Analysis Complete",
-            border_style="green",
-        ))
-    else:
-        console_print(Panel(
-            f"[yellow]📚 No cookbook improvement needed[/yellow]\n"
-            f"[dim]Analysis: {cookbook_update.analysis_summary[:150]}...[/dim]",
-            title="Cookbook Analysis Complete",
-            border_style="yellow",
-        ))
 
