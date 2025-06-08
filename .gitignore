@@ -45,7 +45,6 @@ wandb/
 *.cuh
 
 .vscode/
-data/
 temp_files/
 ./axolotl_dev/train_dataset/
 ./axolotl_dev/repos/
