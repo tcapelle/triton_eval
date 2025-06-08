@@ -34,7 +34,7 @@ class Args:
     verbose: bool = False
     init: bool = False
     data_path: Path = Path("./data")
-    n_rows: int = 3
+    n_rows: int = 200
     entrypoint: str = "pt_entrypoint"
     description: str = "function_description"
     batch_size: int = 10
@@ -986,15 +986,44 @@ async def analyze_errors_and_improve_cookbook():
             border_style="red"
         ))
 
+    # Clear collected errors for the next batch
+    collected_errors.clear()
+    console_print("[blue]🧹 Cleared collected errors for next batch[/blue]")
+
+def save_and_push_dataset(dataset_rows: list, batch_info: str = ""):
+    """Helper function to save dataset to disk and optionally push to hub"""
+    # Create and save the dataset
+    pds = Dataset.from_list(dataset_rows)
+    
+    # Save to disk
+    output_path = args.output_dataset.replace("/", "_")
+    pds.save_to_disk(output_path)
+    console_print(f"[green]💾 Saved dataset to disk: {output_path} ({len(dataset_rows)} total rows){batch_info}[/green]")
+    
+    if args.push:
+        console_print(f"[blue]🚀 Pushing to HuggingFace Hub: {args.output_dataset}{batch_info}[/blue]")
+        pds.push_to_hub(args.output_dataset)
+        console_print(f"[green]✅ Successfully pushed to Hub{batch_info}[/green]")
+
 @weave.op
 async def extend_dataset(n_rows: int, max_turns: int, batch_size: int):
     """Main async function to handle batch processing"""
     # Reset global state for clean execution
     reset_global_state()
     
-    # Generate rows in batches and accumulate them
-    all_new_rows = []
+    # Load existing dataset first
+    try:
+        console_print(f"[yellow]📚 Loading existing dataset: {args.input_dataset}[/yellow]")
+        existing_ds = load_ds(args.input_dataset, init=False)
+        all_rows = list(existing_ds)
+        console_print(f"[blue]📋 Starting with {len(all_rows)} existing rows[/blue]")
+    except Exception as e:
+        console_print(f"[yellow]⚠️ Could not load existing dataset ({e}), starting fresh[/yellow]")
+        all_rows = []
+    
+    # Generate rows in batches and save after each batch
     total_batches = (n_rows + batch_size - 1) // batch_size  # Ceiling division
+    total_new_rows = 0
 
     console.print(Panel(
         f"[bold blue]🚀 Processing {n_rows} rows in {total_batches} batches of {batch_size}[/bold blue]",
@@ -1014,48 +1043,30 @@ async def extend_dataset(n_rows: int, max_turns: int, batch_size: int):
         ))
         
         batch_rows = await generate_rows(n_rows=current_batch_size, max_turns=max_turns)
-        all_new_rows.extend(batch_rows)
+        
+        # Add batch results to the full dataset
+        all_rows.extend(batch_rows)
+        total_new_rows += len(batch_rows)
         
         console_print(f"[green]✅ Batch {batch_idx + 1} completed: {len(batch_rows)} rows generated[/green]")
-        console_print(f"[blue]📊 Total rows so far: {len(all_new_rows)}/{n_rows}[/blue]")
-
-    # After generating all rows, analyze errors and improve cookbook
-    await analyze_errors_and_improve_cookbook()
+        console_print(f"[blue]📊 Total rows: {len(all_rows)} ({total_new_rows} new + {len(all_rows) - total_new_rows} existing)[/blue]")
+        
+        # Analyze errors and improve cookbook after each batch
+        await analyze_errors_and_improve_cookbook()
+        
+        # Save and push after each batch
+        batch_info = f" (after batch {batch_idx + 1}/{total_batches})"
+        save_and_push_dataset(all_rows, batch_info)
 
     console.print(Panel(
-        f"[bold green]🎉 Generated {len(all_new_rows)} new rows total[/bold green]",
+        f"[bold green]🎉 Generation complete![/bold green]\n"
+        f"[green]📊 Final dataset: {len(all_rows)} total rows ({total_new_rows} new rows added)[/green]",
         title="Generation Complete",
         border_style="green"
     ))
 
-    # Load existing dataset and append new rows
-    try:
-        console_print(f"[yellow]📚 Loading existing dataset: {args.input_dataset}[/yellow]")
-        existing_ds = load_ds(args.input_dataset, init=False)
-        existing_rows = list(existing_ds)
-        
-        console_print(f"[blue]📋 Existing dataset has {len(existing_rows)} rows[/blue]")
-        
-    except Exception as e:
-        console_print(f"[yellow]⚠️ Could not load existing dataset ({e}), starting fresh[/yellow]")
-        existing_rows = []
-
-    # Combine existing and new rows
-    combined_rows = existing_rows + all_new_rows
-    console_print(f"[green]📊 Combined dataset: {len(existing_rows)} existing + {len(all_new_rows)} new = {len(combined_rows)} total rows[/green]")
-
-    # Create and save the combined dataset
-    pds = Dataset.from_list(combined_rows)
-
-    # Save to disk
-    output_path = args.output_dataset.replace("/", "_")
-    pds.save_to_disk(output_path)
-    console_print(f"[green]💾 Saved combined dataset to disk: {output_path}[/green]")
-
-    if args.push:
-        console_print(f"[blue]🚀 Pushing to HuggingFace Hub: {args.output_dataset}[/blue]")
-        pds.push_to_hub(args.output_dataset)
-        console_print(f"[green]✅ Successfully pushed to Hub[/green]")
+    # Final save to ensure everything is persisted
+    save_and_push_dataset(all_rows, " (final)")
 
 # Run the main async function
 asyncio.run(extend_dataset(n_rows=args.n_rows, max_turns=args.max_turns, batch_size=args.batch_size))
