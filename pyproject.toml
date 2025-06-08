@@ -19,4 +19,4 @@ dependencies = [
 eval = ["torch>=2.6"]
 
 [tool.setuptools]
-packages = ["triton_eval"]
+packages = ["triton_eval", "triton_eval.agents"]
