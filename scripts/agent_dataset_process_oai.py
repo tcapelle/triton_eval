@@ -173,18 +173,47 @@ class FunctionNameAndDescription(BaseModel):
     function_name: str = Field(description="The name of the Pytorch function")
     function_description: str = Field(description="The description of what the Pytorch function does and why it's interesting to convert to Triton")
 
-creativity_system_prompt = """You are an expert in Pytorch and Triton. You are given a dataset of Pytorch functions and their descriptions.
-You are tasked with generating a new function that is not in the dataset.
-You must generate the function name and a short description of what the function does and why it's interesting to convert to Triton.
+creativity_system_prompt = """You are an expert in PyTorch and Triton.
 
-Some examples of functions that are interesting to convert to Triton:
-- fused_matmul_add: a fused operation that combines matrix multiplication and addition
-- conv_transpose2d: a transposed convolution operation
-- transpose_2d: a 2D transpose operation
-- matmul_relu_add: a fused operation that combines matrix multiplication, ReLU, and addition
-- one_dimensional_attention: a 1D attention operation
+# DATASET  
+You have a list of (function name, description) pairs that already exist.  
+Your task is to invent **one new PyTorch function that is *not* in that list**.
 
-Be creative and make our dataset diverse and rich.
+# STRICT CONSTRAINTS  
+• Use **no more than 3 primitive PyTorch ops**.  
+• Allowed ops:  
+  – element-wise arithmetic (add, sub, mul, div)  
+  – point-wise activations (relu, gelu, sigmoid, tanh)  
+  – small 2-D matmul ≤ 128 × 128  
+  – reductions over the last dimension (sum, mean, max)  
+  – `conv2d` / `conv_transpose2d` with stride = 1 and padding = 0  
+• No `for` / `while` loops or other control-flow; inputs must be contiguous tensors of rank ≤ 4.  
+• Do **not** use RNG, autograd hooks, or dynamic shapes.  
+• Keep the kernel to a **single warp-synchronous phase** (no multi-stage pipelines).
+
+# OUTPUT FORMAT (return valid JSON)  
+```json
+{
+  "name":        "<function_name_in_snake_case>",
+  "description": "<1–2 sentences explaining what the function does>",
+  "feasibility": "<1 sentence on why this maps cleanly to Triton>"
+}
+
+# GOOD EXAMPLES
+
+fused_matmul_add: matrix multiplication followed immediately by bias add.
+
+transpose_2d: transposes the last two dims of a 2-D tensor.
+
+# BAD EXAMPLE (too complex)
+
+hierarchical_multi_head_attention: combines multiple attention mechanisms and variable sequence lengths.
+
+# THINK STEP-BY-STEP
+1. Pick 1–2 allowed primitives
+2. fuse them if helpful, (3) craft a concise name, (4) write the description, (5) add a one-sentence feasibility rationale.
+
+Generate exactly one JSON object and nothing else.
 """
 
 creativity_user_prompt = """
@@ -926,10 +955,24 @@ async def generate_new_functions_parallel(n_rows: int, max_turns: int):
     # First, generate all function names/descriptions sequentially to avoid repetition
     console_print(f"[yellow]📝 Generating {n_rows} unique function names/descriptions...[/yellow]")
     function_infos = []
+    
+    # Create a dynamic dataset that includes both original and newly generated functions
+    # Make a copy to avoid modifying the original dataset
+    current_ds = input_ds.select(range(len(input_ds)))  # Creates a copy
+    
     for i in range(n_rows):
         console_print(f"[dim]Generating function {i+1}/{n_rows}...[/dim]")
-        function_info = await generate_function_name_and_description(input_ds)
+        
+        function_info = await generate_function_name_and_description(current_ds)
         function_infos.append(function_info)
+        
+        # Add this function to our running dataset so next generations see it
+        new_entry = {
+            args.entrypoint: function_info.function_name,
+            args.description: function_info.function_description
+        }
+        current_ds = current_ds.add_item(new_entry)
+        
         console_print(f"[green]✅ Generated: {function_info.function_name}[/green]")
     
     # Now run the actual row generation in parallel with pre-generated function info
@@ -999,8 +1042,12 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
         pds_list = await generate_new_functions_parallel(n_rows, max_turns)
     
     # Count successes and failures
-    successes = [pds for pds in pds_list if pds is not None and not isinstance(pds, Exception)]
-    failures = [pds for pds in pds_list if pds is None or isinstance(pds, Exception)]
+    valid_rows = [pds for pds in pds_list if pds is not None and not isinstance(pds, Exception)]
+    exceptions = [pds for pds in pds_list if pds is None or isinstance(pds, Exception)]
+    
+    # Filter to only include rows where Triton is correct
+    triton_correct_rows = [row for row in valid_rows if row.get("triton_is_correct", False)]
+    triton_incorrect_rows = [row for row in valid_rows if not row.get("triton_is_correct", False)]
     
     # Results summary
     if args.fix:
@@ -1008,13 +1055,16 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
     else:
         mode_desc = "generated functions"
         
-    result_text = f"[bold green]✅ Successfully processed: {len(successes)}/{len(pds_list)} {mode_desc}[/bold green]"
-    if failures:
-        result_text += f"\n[bold red]❌ Failed: {len(failures)}/{len(pds_list)} {mode_desc}[/bold red]"
+    result_text = f"[bold green]✅ Successfully processed with correct Triton: {len(triton_correct_rows)}/{len(pds_list)} {mode_desc}[/bold green]"
+    if triton_incorrect_rows:
+        result_text += f"\n[bold yellow]⚠️ Processed but Triton incorrect: {len(triton_incorrect_rows)}/{len(pds_list)} {mode_desc}[/bold yellow]"
+    if exceptions:
+        result_text += f"\n[bold red]❌ Failed with exceptions: {len(exceptions)}/{len(pds_list)} {mode_desc}[/bold red]"
     
     console_print(Panel(result_text, title="📈 Final Results", border_style="green"))
     
-    return successes
+    # Only return rows where Triton is correct
+    return triton_correct_rows
 
 # ---------------------------------------------------------------------------
 # Error reflection helpers (defined before first use)
