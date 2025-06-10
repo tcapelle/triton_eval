@@ -36,7 +36,7 @@ def format_example(example):
     if args.reasoning_col:
         reasoning = example[args.reasoning_col]
         triton_code = example[args.triton_col]
-        output = f"<reasoning>\n{reasoning}\n</reasoning>\n\n3. Triton Code:\n<triton>\n{triton_code}\n</triton>"
+        output = f"<{args.reasoning_token}>\n{reasoning}\n</{args.reasoning_token}>\n\n3. Triton Code:\n<{args.code_token}>\n{triton_code}\n</{args.code_token}>"
         messages.append({"role": "assistant", "content": output})
 
 
@@ -47,4 +47,4 @@ def format_example(example):
 
 if not args.debug:
    formatted_ds = ds.map(format_example)
-   formatted_ds.push_to_hub(args.ds_name + "_sft")
+   formatted_ds.push_to_hub(args.ds_name + "_think")
