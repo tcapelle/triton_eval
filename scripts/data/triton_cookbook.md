@@ -1,116 +1,145 @@
-# Triton Kernel Conversion Prompt – COMPLETE EDITION
-(LLM-Ready, **REV-AUG 2027.a**) – adds rules 76-80 and new Pooling mini-guide drafted from recent failure cases; clarifies pointer arithmetic for strided windows, broadcast bias add, and dynamic-size safeguards.  This document *completely* replaces every earlier edition, including JULY 2027.m.
+# Triton Kernel Conversion Prompt (LLM‑Ready, June 2025)
 
---------------------------------------------------------------------
+**Context block for an LLM that must rewrite a PyTorch op into a high‑performance Triton kernel. Follow every rule exactly.**
 
-## 0. GOLDEN RULES – quick checklist before you hit “Run”
-(NEW or changed since JULY 2027.m are ★★★-marked, **bold** where vital)
+---
 
-✓  **`tl.cast` is gone → use `tl.astype(x, tl.int32/float32)` for *all* scalar *and* vector casts.** (★ reminder)
-✓  **All reduction intrinsics (`tl.sum`, `tl.max`, `tl.min`, …) take the *axis index as a positional-only argument*.** `tl.sum(x, 0)` is legal, `tl.sum(x, axis=0)` is *not*.
-✓  Python numeric literals (`1`, `1.0`, etc.) default to *float64* in Triton.  Prefer `tl.full([], 1, dtype)` or `tl.asarray(1, dtype)`.
-✓  ★★★ **Triton has no `view`/`reshape`.  If you need `x.view(N, D // W, W)` you must compute pointer math manually.**  (new)
-✓  ★★★ **Pooling or windowed reductions must materialise the window with `tl.arange`-based offsets, not Python loops or `tl.broadcast_to`.  See §7b.**
-✓  ★★★ **Broadcast add/mul uses standard arithmetic; *one dim must be length-1* in the active lanes.  Pre-compute a bias pointer and stride with `tl.arange` instead of fancy indexing.**
+## Kernel Skeleton — start here
 
---------------------------------------------------------------------
-
-## 1. KERNEL SKELETON — start here (unchanged except safer literals)
 ```python
-import triton
 import triton.language as tl
 
 @triton.jit
 def KERNEL_NAME(
-    x_ptr,                # tensor, *not* pointer
-    N,                    # rows
-    D,                    # cols (optional if constexpr)
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+    x_ptr,                # *T*  – tensor pointer(s)
+    N,                    # *i64* – total elements
+    BLOCK_SIZE: tl.constexpr,
 ):
-    pid_n  = tl.program_id(0)              # row index
-    pid_d  = tl.program_id(1)              # tile along last-dim, ▢ optional
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
 
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-
-    mask_n = offs_n < N
-    mask_d = offs_d < D
-
-    ptrs = x_ptr + offs_n[:, None] * D + offs_d[None, :]   # 2-D pointer grid
-    ZEROS = tl.full([BLOCK_N, BLOCK_D], 0, tl.float32)
-    x = tl.load(ptrs, mask=mask_n[:, None] & mask_d[None, :], other=ZEROS)
-
-    # … do work …
-
-    tl.store(ptrs, x, mask=mask_n[:, None] & mask_d[None, :])
+    data = tl.load(x_ptr + offs, mask=mask)
+    # TODO: compute
+    tl.store(x_ptr + offs, data, mask=mask)
 ```
-Key take-away:  Reshape is emulated by mixed-rank pointer math.
 
---------------------------------------------------------------------
+---
 
-## 2. MANDATORY RULES (apply in this exact order)
-…rules 17-67 unchanged…
+## Mandatory Rules (obey in order)
 
-68. **`tl.cast` has been removed.**  *Every* cast – tensor or scalar – now uses `tl.astype(x, dtype)`.
+1. **Tile & Mask**  Compute indices with `tl.program_id` + `tl.arange`; mask **every** `tl.load`/`tl.store`.
+2. **constexpr Params**  Expose *all* tile sizes, unroll factors, stage counts, precision flags via `tl.constexpr` args.
+3. **Async Pipeline**  Overlap GMEM→SMEM with compute via `tl.async_copy` (or `tl.tma_async_copy` on Hopper). Pick `num_stages` so `shared_mem ≤ 96 KiB` (L4) or device limit.
+4. **128‑B Coalescing**  Keep global loads/stores 128‑byte aligned; on Triton 3.0 use `tl.make_block_ptr`, and be aware that upcoming 3.1+ may switch to `tl.make_tensor_descriptor`/TMA descriptors — write a thin helper so you can swap APIs easily. ([github.com](https://github.com/pytorch/pytorch/issues/154025?utm_source=chatgpt.com))
+5. **FP32 Accumulators**  Accumulate in FP32, cast to output dtype only at the epilogue.
+6. **On‑Chip Fusion**  Fuse bias/activation/reduction in the same pass when possible.
+7. **Warp Specialization**  If the inner loop fits ≤ 32 iterations, guard a warp‑specialized path with `if tl.warp_specialize(WARP_MODE): …`.
+8. **Grid & Occupancy**  Derive launch grid from input shapes. Query GPU props (NUM\_SMS, SMEM\_MAX, REGS\_MAX, WARPS\_MAX) and ensure occupancy ≥ 1 warp/SM.
+9. **Autotuning**  Wrap the kernel with `@triton.autotune`, sweeping over tile sizes, `num_stages`, and `num_warps`; prune configs larger than the data.
+10. **Reductions**  Use `tl.atomic_add` (FP32 supported on Hopper+) or a two‑phase reduction (pre‑Hopper).
+11. **Forward / Backward**  Implement separate Triton kernels inside a `torch.autograd.Function`.
+12. **Debug Guards**  Wrap `tl.debug_barrier()` or prints inside `if DEBUG: tl.constexpr` to strip them from prod builds.
+13. **Validation & Bench**  Verify with `torch.testing.assert_close`; benchmark and keep the best ≤ 5 configs.
 
-69-72 unchanged.
+---
 
-73. **Reductions are positional-only.**  Write `tl.sum(x, 0)` – *never* `tl.sum(x, axis=0)`.
+## Buffer Arguments & `tl.constexpr` Meta‑Parameters
 
-74. **Typed literals only.**  Bare Python numerics are float64.  Always materialise a literal with `tl.full([], val, dtype)` or reuse an existing variable’s dtype.
+**Directive to LLM**  For every kernel you generate:
 
-75. **Avoid silent fp64→fp32 promotion.**  Keep everything consistently typed.
+1. **Buffer Arguments**  Pass tensor buffers **un‑annotated** (e.g., `x_ptr`, `y_ptr`). Triton infers they are device pointers; no `tl.pointer(...)` annotation exists in the Python API.
+2. **Compile‑time Meta‑Parameters**  Mark tile sizes, unroll factors, stage counts, precision flags, and other design‑time constants as `tl.constexpr`. Do **not** mark runtime sizes (`M`, `N`, batch length) as `constexpr`.
+3. \`\`\*\* Base Argument\*\*  Supply the **raw device pointer** (`tensor.data_ptr()`) as the first argument—never a `torch.Tensor`, dtype object, or literal integer offset.
+4. **Pointer Safety**  If a pointer is produced inside Triton (e.g., shared‑memory alias), keep it as a pointer type; do not cast to `int` before reuse.
 
-76. **No `.view` / `.reshape`.**  Any logical reshape must be reproduced through linear-index math (`row * stride + col`).  Attempting to port `x.view(N, new_D, W)` from PyTorch is the #1 cause of “placeholder kernels”.
+### Example
 
-77. **Fixed-window pooling requires compile-time window size** (`WINDOW: tl.constexpr`) *or* a fallback loop with `tl.arange` sized to the *maximum* supported window and masked lanes for smaller cases.
+```python
+@triton.jit
+def fp16_relu(
+    x_ptr,  # tensor pointer (no annotation)
+    y_ptr,
+    N,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
 
-78. **Window offsets are always contiguous.**  Create them with `base + tl.arange(0, W)`, **never** via dynamic indexing of a global pointer list.
+    x = tl.load(x_ptr + offs, mask=mask)
+    y = tl.maximum(x, 0.0)
+    tl.store(y_ptr + offs, y, mask=mask)
+```
 
-79. **Mean-pool = sum / window_size (typed).**  Use `inv_W = tl.full([], 1.0 / WINDOW, x.dtype)` then `out = tl.sum(win, 0) * inv_W`.  Do *not* rely on integer division.
+---
 
-80. **Broadcast bias addition.**  For a pooled output of shape `(N, new_D)` and a bias of `(new_D,)`, compute `bias_ptr = bias + offs_d` and load once per output tile.  Broadcasting by constructing a `[BLOCK_N, BLOCK_D]` bias tensor trom inside the kernel wastes memory bandwidth.
+## Anti‑Patterns (✗ never do)
 
---------------------------------------------------------------------
+- Unmasked out‑of‑bounds memory ops
+- Excessive register pressure from huge tiles / unrolls
+- Increasing `num_stages` beyond SMEM limit
+- Hard‑coding grid sizes or launch bounds
+- Using deprecated APIs (`make_tensor_descriptor`); use `make_block_ptr`
+- Shipping kernels with `tl.debug_barrier()` or print statements
 
-## 5. QUICK REFERENCE – one-liners worth memorising
-• `ZERO  = tl.full([], 0, x.dtype)` – typed zero scalar.
-• `ONE   = tl.full([], 1, x.dtype)` – typed one scalar.
-• `int32_val = tl.astype(val, tl.int32)` – legal scalar cast.
-• `sum0 = tl.sum(x, 0)` – positional-only reduction.
-• ★ `row_ptrs = base + offs_n * STRIDE` – canonical strided access.
-• ★ `inv_W = tl.full([], 1.0 / WINDOW, x.dtype)` – typed reciprocal for mean.
+---
 
---------------------------------------------------------------------
+### Conversion Workflow for the LLM
 
-## 7. MINI-GUIDES
+1. **Insert the skeleton** and rename `KERNEL_NAME`.
+2. **Map PyTorch tensor shapes** → choose initial tile sizes (64‑128 range).
+3. **Apply Rules 1‑5** to flesh out the kernel body.
+4. **Add async pipeline** and `num_stages` knob (Rule 3).
+5. **Create an autotune sweep** (Rule 9).
+6. **Wrap** kernel(s) in a `torch.autograd.Function` (Rule 11).
+7. **Return**: Triton kernel(s) + autotuner wrapper + PyTorch glue.
 
-### 7a. “Why did my reduction blow up?”  (unchanged from prior rev)
-…
+## Libdevice & External Math Functions
 
-### 7b. “How do I do mean-pool over fixed windows?”  (NEW)
-Scenario: you have `(N, D)` and want `(N, D // W)` where `W` is a small compile-time window.
+**Directive to LLM**  Use `tl.extra.libdevice` whenever a kernel needs a transcendental math function (e.g., `asin`, `acos`, `erf`) that Triton does not provide natively.
 
-1. Declare `WINDOW: tl.constexpr` arg.  Run-time windows destroy vectorisation.
-2. Tile rows with `BLOCK_N`, pooled columns with `BLOCK_P = 128` (or whatever).
-3. Compute base column indices *in pooled space*: `offs_p = pid_p * BLOCK_P + tl.arange(0, BLOCK_P)`.
-4. Recover *input* column indices:  `offs_in = offs_p[:, None] * WINDOW + tl.arange(0, WINDOW)[None, :]`  ➜ shape `[BLOCK_P, WINDOW]`.
-5. Build 2-D pointer: `ptrs = x_ptr + offs_n[:, None, None] * D + offs_in[None, :, :]`.
-6. Load window `win = tl.load(ptrs, …)`; reduce `sums = tl.sum(win, -1)`.
-7. Multiply by `inv_W` (typed reciprocal) to get the mean.
-8. Add broadcast bias: `bias_vals = tl.load(bias_ptr + offs_p, mask=mask_p)`.
-9. Store.
+### Usage Rules
 
-Pitfalls caught in recent failures:
-• Forgetting the `[:, None]` & `[None, :]` rank alignment, leading to pointer-arithmetic shape errors.
-• Using Python `for` over `WINDOW`; use vector arithmetic instead.
-• Dividing by `WINDOW` (an *int*) instead of pre-multiplying by `1.0 / WINDOW` with correct dtype.
+1. `from triton.language.extra import libdevice` inside your Python module.
+2. Call the function inside the kernel (`libdevice.asin`, `libdevice.erf`, …); Triton auto‑routes to the correct bit‑code implementation based on the tensor dtype.
+3. The default NVIDIA/AMD bit‑code paths are shipped with Triton and are resolved automatically—no user action needed.
+4. Functions are aggregated by semantics, not dtype (`__nv_asin` + `__nv_asinf` → `libdevice.asin`).
 
---------------------------------------------------------------------
+### Kernel Example — `asin`
 
-## 8. VERSION NOTES
-Revision **AUG 2027.a** introduces rules 76-80 and §7b after analysing multiple recent auto-conversions that failed whenever PyTorch code used `.view` + `.mean(dim=-1)` for pooling.  Guidance now shows the exact pointer arithmetic pattern and emphasises typed reciprocal for averages.
+```python
+@triton.jit
+def asin_kernel(
+    x_ptr, y_ptr,
+    N,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid   = tl.program_id(0)
+    offs  = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask  = offs < N
 
---------------------------------------------------------------------
+    x = tl.load(x_ptr + offs, mask=mask)
+    y = libdevice.asin(x)                 # external math call
+    tl.store(y_ptr + offs, y, mask=mask)
+```
+
+
+
+**Validation**   Compare against `torch.asin` using `torch.testing.assert_close` (see Rule 13).
+
+---
+
+### Conversion Workflow for the LLM
+
+1. **Insert the skeleton** and rename `KERNEL_NAME`.
+2. **Map PyTorch tensor shapes** → choose initial tile sizes (64‑128 range).
+3. **Apply Rules 1‑5** to flesh out the kernel body.
+4. **Add async pipeline** and `num_stages` knob (Rule 3).
+5. **Create an autotune sweep** (Rule 9).
+6. **Wrap** kernel(s) in a `torch.autograd.Function` (Rule 11).
+7. \*\*If an external math op is needed, integrate \*\*\`\` per this section.
+8. **Return**: Triton kernel(s) + autotuner wrapper + PyTorch glue.
+
 *End of prompt block.*
+
