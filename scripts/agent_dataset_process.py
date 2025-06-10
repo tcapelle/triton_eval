@@ -1,9 +1,7 @@
-"Reverse the jit triton kernel to pytorch code"
-
-
 import asyncio
 from weave.flow.util import async_foreach
 from weave.trace.op_caller import async_call
+from pathlib import Path
 import openai
 import weave
 from dataclasses import dataclass
@@ -20,7 +18,7 @@ console = Console()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/boostrap_triton_ran"
+    input_dataset: str = "tcapelle/boostrap_triton"
     output_dataset: str = "tcapelle/boostrap_triton_ran"
     weave_project: str = "grpo-cuda/dataset_agent"
     push: bool = False
@@ -49,8 +47,15 @@ clear_temp_files()
 
 weave.init(args.weave_project)
 
+triton_cookbook = Path("./data/triton_cookbook.md").read_text()
 
-system_message = """You are an expert PyTorch Triton programmer. Your task is to make sure the Triton code runs and is correct. Run it and check the output. If it doesn't work, fix it. You have access to tools to run code on GPU."""
+system_message = """You are an expert PyTorch Triton programmer. Your task is to make sure the Triton code runs and is correct. Run it and check the output. 
+If it doesn't work, fix it. You have access to tools to run code on GPU.
+
+You can use this cookbook of best practices to write Triton kernels: {triton_cookbook}.
+
+Make sure to run the code one more time before submiting your final solution.
+"""
 
 
 class PytorchCodeWithTests(BaseModel):
