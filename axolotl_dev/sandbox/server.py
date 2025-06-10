@@ -382,6 +382,7 @@ async def run_code_endpoint(request: CodeExecutionRequest):
 
     task_id = str(uuid.uuid4())
     code_string = (
+        "from typing import *\n"
         "import torch\n"
         "import triton\n"
         "import triton.language as tl\n\n"
