@@ -36,13 +36,13 @@ spec:
         - name: docker-graph-storage
           mountPath: /var/lib/docker
         - name: devpod-storage
-          mountPath: /workspace
+          mountPath: /workspace/data
           subPath: dind-workspace
         env:
         - name: DOCKER_TLS_CERTDIR
           value: ""
       - name: devpod
-        image: ghcr.io/tcapelle/triton_eval:2605
+        image: ghcr.io/tcapelle/triton_eval:1006
         ### Run start with an infinite sleep loop
         securityContext:
           privileged: true
@@ -83,6 +83,7 @@ spec:
           export WANDB_API_KEY="$WANDB_API_KEY"
           export HF_TOKEN="$HF_TOKEN"
           export OPENAI_API_KEY="$OPENAI_API_KEY"
+          export TRITON_SERVER_URL="$TRITON_SERVER_URL"
           EOF
           
           mkdir -p /run/sshd
@@ -147,7 +148,7 @@ spec:
         - name: shared-tools
           mountPath: /shared
         - name: devpod-storage
-          mountPath: /workspace
+          mountPath: /workspace/data
         - name: ssh-keys
           mountPath: /etc/ssh-keys
           readOnly: true
@@ -158,6 +159,8 @@ spec:
         env:
         - name: DOCKER_HOST
           value: "tcp://localhost:2375"
+        - name: TRITON_SERVER_URL
+          value: "http://axolotl-rewards-service:9347"
         - name: WANDB_API_KEY
           valueFrom:
             secretKeyRef:
