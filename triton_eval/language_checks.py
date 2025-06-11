@@ -1,6 +1,21 @@
 """reward_language.py – English-only bonus/penalty for GRPO-style RLHF."""
 import re
 import os
+
+# NumPy 2.0 compatibility fix for FastText
+try:
+    import numpy as np
+    if hasattr(np, '__version__') and np.__version__.startswith('2.'):
+        # Monkey patch numpy to handle FastText's copy=False issue
+        original_array = np.array
+        def patched_array(*args, **kwargs):
+            if 'copy' in kwargs and kwargs['copy'] is False:
+                kwargs['copy'] = None  # Let NumPy decide
+            return original_array(*args, **kwargs)
+        np.array = patched_array
+except ImportError:
+    pass
+
 import fasttext
 
 # ----------  Normalisation --------------------------------------------------

@@ -1,6 +1,6 @@
 FROM axolotlai/axolotl:main-latest
 
-RUN pip install weave httpx wandb fasttext==0.9.3
+RUN pip install weave httpx wandb
 
 # Copy everything to /app
 COPY . /app
