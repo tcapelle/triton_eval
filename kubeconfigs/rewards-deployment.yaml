@@ -30,11 +30,11 @@ spec:
       # imagePullSecrets: ...
       containers:
       - name: axolotl-rewards-container
-        image: ghcr.io/tcapelle/triton_eval:2105.1 # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:1206 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["python"]
         args:
-          - "server.py"
+          - "sandbox/server.py"
         env:
           - name: TASK_TIMEOUT_SECONDS
             value: "240"

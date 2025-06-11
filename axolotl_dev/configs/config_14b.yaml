@@ -1,6 +1,6 @@
 # base_model: Qwen/Qwen2.5-Coder-14B-Instruct
 # base_model: winglian/qwen3-14b-triton-sft-v4
-base_model: tcapelle/axolotl-sft-qwen3-14b-instruct
+base_model: tcapelle/axolotl-sft-qwen3-14b-boot
 
 # base_model: /workspace/data/axolotl-artifacts/grpo-beta-zero
 # Automatically upload checkpoint and final model to HF
@@ -15,41 +15,48 @@ strict: false
 rl: grpo
 trl:
   beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.3 # as in mistral paper
   max_completion_length: 8192
   num_generations: 32
   use_vllm: true
+  loss_type: dr_grpo # default -> bnpo
+  scale_rewards: false # default -> true, should be false for dr_grpo
+  top_k: # just to be explicit
   vllm_server_host: "axolotl-vllm-service"
   vllm_server_port: 8000
   reward_funcs:
     - rewards.reset_rewards_server
     - rewards.think_reward
-    # - rewards.one_code_blob_reward
+    - rewards.one_code_blob_reward
     - rewards.reward_code_runs
-    # - rewards.imports_decorator_reward
-    # - rewards.constexpr_reward
-    # - rewards.valid_tl_methods_reward
+    - rewards.imports_decorator_reward
+    - rewards.constexpr_reward
+    - rewards.valid_tl_methods_reward
     - rewards.masks_load_store_reward
     - rewards.torch_empty_penalty
     - rewards.torch_zeros_reward
+    - rewards.language_reward
   reward_weights:
   vllm: # stuff used by the trainer to call the vllm server
     vllm_gpu_memory_utilization: 0.9
-    reasoning_parser: "deepseek_r1"
-    enable_reasoning: true
+    # reasoning_parser: "deepseek_r1"
+    # enable_reasoning: true
 
-chat_template: qwen3
+# chat_template: qwen3
+chat_template: qwen_25
 # chat_template_jinja: "{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0].role == 'system' %}\n        {{- messages[0].content + '\\n\\n' }}\n    {%- endif %}\n    {{- \"# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0].role == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0].content + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (messages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user\" and not(message.content.startswith('<tool_response>') and message.content.endswith('</tool_response>')) %}\n        {%- set ns.multi_step_tool = false %}\n        {%- set ns.last_query_index = index %}\n    {%- endif %}\n{%- endfor %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set content = message.content %}\n        {%- set reasoning_content = '' %}\n        {{- '<|im_start|>' + message.role + '\\n' + content }}\n        {%- if message.tool_calls %}\n            {%- for tool_call in message.tool_calls %}\n                {%- if (loop.first and content) or (not loop.first) %}\n                    {{- '\\n' }}\n                {%- endif %}\n                {%- if tool_call.function %}\n                    {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {{- '<tool_call>\\n{\"name\": \"' }}\n                {{- tool_call.name }}\n                {{- '\", \"arguments\": ' }}\n                {%- if tool_call.arguments is string %}\n                    {{- tool_call.arguments }}\n                {%- else %}\n                    {{- tool_call.arguments | tojson }}\n                {%- endif %}\n                {{- '}\\n</tool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.first or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}"
 datasets:
   - path: tcapelle/boostrap_triton_v0
     split: train
     field_messages: prompt
-  - path: tcapelle/train_ds_triton
+  - path: tcapelle/boostrap_oai_pt_think
     split: train
     field_messages: prompt
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
-output_dir: /model-checkpoints/grpo-qwen3-14b-isntruct
+output_dir: /model-checkpoints/grpo-qwen3-14b-instruct-dr_grpo_ct25
 
 dataloader_prefetch_factor: 32
 dataloader_num_workers: 2
@@ -64,7 +71,7 @@ pad_to_sequence_len: false
 
 wandb_project: axolotl-grpo
 wandb_entity: grpo-cuda
-wandb_name: grpo-qwen3-14b-isntruct
+wandb_name: grpo-qwen3-14b-instruct-dr_grpo_ct25
 wandb_log_model: checkpoint
 
 gradient_accumulation_steps: 3
@@ -73,7 +80,7 @@ num_epochs: 3
 
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
-learning_rate: 1.0e-5
+learning_rate: 1.0e-6
 max_grad_norm: 1.0e-4
 weight_decay: 0.01
 

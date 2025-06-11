@@ -35,7 +35,7 @@ spec:
       # imagePullSecrets: ...
       containers:
       - name: axolotl-train-container
-        image: ghcr.io/tcapelle/triton_eval:1006.1 # <-- UPDATE THIS
+        image: ghcr.io/tcapelle/triton_eval:1206 # <-- UPDATE THIS
         workingDir: /app/axolotl_dev
         command: ["axolotl"]
         args:

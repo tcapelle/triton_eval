@@ -166,8 +166,8 @@ class TestDetectLang:
             # Test with text that's only newlines/whitespace
             result = detect_lang("\n\n\r\n  \t  \n")
             
-            # Should return 'unknown' for empty text and not call the model
-            assert result == "unknown"
+            # Should return 'en' for empty text and not call the model (backward compatibility)
+            assert result == "en"
             mock_model.predict.assert_not_called()
 
     def test_mixed_language_text(self):
