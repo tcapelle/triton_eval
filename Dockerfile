@@ -1,8 +1,6 @@
 FROM axolotlai/axolotl:main-latest
 
-# Pin NumPy to avoid FastText compatibility issues with NumPy 2.0+
-RUN pip install "numpy<2.0" --upgrade
-RUN pip install weave httpx wandb
+RUN pip install weave httpx wandb fasttext==0.9.3
 
 # Copy everything to /app
 COPY . /app
