@@ -668,7 +668,7 @@ error_reflection_user_prompt = """Analyze these collected Triton conversion erro
 
 {error_details}
 
-Please analyze these errors for patterns and create an improved version of the complete cookbook that addresses the systematic issues you identified."""
+Please analyze these errors for patterns and create an improved version of the complete cookbook that addresses the systematic issues you identified. Generate a new version of the cookbook without any reference to the current cookbook."""
 
 
 # Create the output agents first
