@@ -134,6 +134,42 @@ class TestDetectLang:
             result = detect_lang("def func(): return x + y")
             assert isinstance(result, str)
 
+    def test_text_with_newlines(self):
+        """Test that text with newlines is handled correctly.
+        
+        This test would fail with the original code because FastText
+        raises ValueError: predict processes one line at a time (remove '\\n')
+        """
+        with patch('triton_eval.language_checks._get_model') as mock_get_model:
+            mock_model = MagicMock()
+            mock_model.predict.return_value = (['__label__en'], [0.99])
+            mock_get_model.return_value = mock_model
+            
+            # Test with various newline scenarios
+            multiline_text = """This is a multi-line text
+            that spans several lines
+            and should be handled correctly"""
+            
+            result = detect_lang(multiline_text)
+            assert result == "en"
+            
+            # Verify that the model.predict was called with single-line text
+            call_args = mock_model.predict.call_args[0][0]  # First positional argument
+            assert '\n' not in call_args, "Text passed to FastText should not contain newlines"
+            assert '\r' not in call_args, "Text passed to FastText should not contain carriage returns"
+            
+    def test_text_with_only_newlines(self):
+        """Test handling of text that becomes empty after newline removal."""
+        with patch('triton_eval.language_checks._get_model') as mock_get_model:
+            mock_model = MagicMock()
+            
+            # Test with text that's only newlines/whitespace
+            result = detect_lang("\n\n\r\n  \t  \n")
+            
+            # Should return 'unknown' for empty text and not call the model
+            assert result == "unknown"
+            mock_model.predict.assert_not_called()
+
     def test_mixed_language_text(self):
         """Test with mixed language text."""
         with patch('triton_eval.language_checks._get_model') as mock_get_model:

@@ -44,7 +44,12 @@ def _get_model():
 
 def detect_lang(text: str, k: int = 1) -> str:
     """Return ISO-639-1 language code predicted with highest probability."""
-    label, _ = _get_model().predict(text, k=k)
+    # FastText predict requires single line text - replace newlines with spaces
+    single_line_text = text.replace('\n', ' ').replace('\r', ' ').strip()
+    if not single_line_text:  # Handle empty text
+        return 'unknown'
+    
+    label, _ = _get_model().predict(single_line_text, k=k)
     return label[0].replace('__label__', '')
 
 # ----------  Reward ----------------------------------------------------------
