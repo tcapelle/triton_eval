@@ -9,7 +9,7 @@ TORCH_WRAPPER_WHITELIST = {
     # Type/Property Checks
     "is_tensor", "is_floating_point", "is_complex", "is_conj", "is_nonzero",
     "dtype", "device", "layout", "ndim", "shape", "size", "stride", "numel", "element_size",
-    "get_default_dtype", "set_default_dtype", "get_device", "can_cast",
+    "get_default_dtype", "set_default_dtype", "get_device", "can_cast", "dim", "contiguous", "view",
     # Data type objects/functions often used with .to() or in creation
     "float32", "float", "float64", "double", "float16", "half", "bfloat16",
     "complex32", "complex64", "complex128",
@@ -18,7 +18,8 @@ TORCH_WRAPPER_WHITELIST = {
     # Casting/Device Transfer
     "to", "cpu", "cuda",
     # Misc
-    "as_tensor", "from_numpy", "manual_seed", "is_autocast_enabled", "get_autocast_gpu_dtype"
+    "as_tensor", "from_numpy", "manual_seed", "is_autocast_enabled", "get_autocast_gpu_dtype",
+    "where", "broadcast_shapes"
 }
 
 class TritonKernelSanityChecker(ast.NodeVisitor):
@@ -216,6 +217,19 @@ def is_valid_kernel(src: str, entrypoint: str) -> dict:
         return {'is_valid': False, 'reason': 'Triton kernel has an empty body.'}
 
     # --- At this point, the entrypoint is a wrapper function ---
+
+    # Check if the entrypoint function actually exists in the source code
+    all_function_names = set()
+    for item in ast.walk(tree):
+        if isinstance(item, ast.FunctionDef):
+            all_function_names.add(item.name)
+    
+    if entrypoint not in all_function_names:
+        if all_function_names:
+            available_funcs = ', '.join(sorted(all_function_names))
+            return {'is_valid': False, 'reason': f'Expected entrypoint function "{entrypoint}" not found. Available functions: {available_funcs}. Please ensure the generated function has the same name as the original PyTorch function.'}
+        else:
+            return {'is_valid': False, 'reason': f'Expected entrypoint function "{entrypoint}" not found and no functions are defined in the source code.'}
 
     # Rule 3a: Source needs to define Triton kernels to call
     if not checker.triton_kernel_defs:
