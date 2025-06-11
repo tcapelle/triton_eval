@@ -1,6 +1,6 @@
 FROM axolotlai/axolotl:main-latest
 
-RUN pip install weave httpx
+RUN pip install weave httpx git+https://github.com/wandb/wandb.git@main
 
 # Copy everything to /app
 COPY . /app
