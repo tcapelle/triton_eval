@@ -16,6 +16,7 @@ import logging
 from contextlib import nullcontext
 from triton_eval.agents.tools import extract_code, run_python_code  # run_python_in_process no longer used
 from triton_eval.kernel_checks import is_valid_kernel
+from triton_eval.language_checks import detect_lang, quick_check
 
 # Configure httpx logger to only show WARNING or higher levels
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -102,6 +103,8 @@ REWARD_MAGNITUDES = {
     "torch_empty_penalty": -0.1,
     "torch_zeros_ok": 0.1,
     "exp_penalty": 0.5,
+    "language_bonus": 0.1,
+    "language_penalty": -0.2,
 }
 
 try: # this is not working, we are not saving the reward magnitudes to wandb
@@ -296,6 +299,56 @@ def reward_code_runs(completions, tests, stdout, entrypoint, **kwargs):
         return asyncio.run(_compute_async())
     else:
         return loop.run_until_complete(_compute_async())
+
+# ===== Language Reward =====
+
+@weave.op
+def language_scorer(output: str) -> dict:
+    """Score the language composition of the entire output."""
+    if not output or not output.strip():
+        return {
+            "output_lang": "en",
+            "all_english": True,
+            "non_english_count": 0,
+            "total_parts": 0
+        }
+    
+    # Use quick_check first for performance
+    if quick_check(output):
+        # Quick check passed, assume English
+        detected_lang = "en"
+    else:
+        # Use full language detection on the raw output
+        detected_lang = detect_lang(output)
+    
+    all_english = (detected_lang == "en")
+    
+    return {
+        "output_lang": detected_lang,
+        "all_english": all_english,
+        "non_english_count": 0 if all_english else 1,
+        "total_parts": 1
+    }
+
+def language_reward(completions, **kwargs):
+    """Reward English responses, penalize non-English content."""
+    responses = [completion[0]['content'] for completion in completions]
+    rewards = []
+    
+    for response in responses:
+        with wandb_attributes():
+            lang_score = language_scorer(response)
+        
+        all_english = lang_score["all_english"]
+        
+        if all_english:
+            reward = REWARD_MAGNITUDES["language_bonus"]
+        else:
+            reward = REWARD_MAGNITUDES["language_penalty"]
+        
+        rewards.append(reward)
+    
+    return rewards
 
 # ===== Static Code Analysis Rewards =====
 
