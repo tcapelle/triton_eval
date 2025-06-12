@@ -33,52 +33,81 @@ def is_fatal_error(exception) -> bool:
 
     return False
 
-def _run_benchmark(kernel_module, benchmark_runs):
-    """Run benchmarking on already executed and compiled kernel module."""
+def _run_benchmark(temp_file_path, task_type, benchmark_runs):
+    """Run benchmarking by re-executing the entire module multiple times."""
     times = []
     memory_peaks = []
     
-    # Look for a function that might be the main entry point for benchmarking
-    # We'll try to find functions that might be test/benchmark functions
-    benchmark_function = None
-    
-    # Common patterns for benchmark functions
-    possible_names = ['benchmark_function', 'main', 'test', 'run_test', 'run_benchmark']
-    for name in possible_names:
-        if hasattr(kernel_module, name):
-            benchmark_function = getattr(kernel_module, name)
-            break
-    
-    # If no explicit benchmark function, try to find any callable that's not a built-in
-    if benchmark_function is None:
-        for attr_name in dir(kernel_module):
-            if not attr_name.startswith('_'):
-                attr = getattr(kernel_module, attr_name)
-                if callable(attr) and not isinstance(attr, type):
-                    benchmark_function = attr
-                    break
-    
-    if benchmark_function is None:
-        raise Exception("No benchmarkable function found in the module")
-    
-    # Warmup runs (3 runs)
+    # Warmup runs (3 runs) - re-execute entire module
     for _ in range(3):
         try:
-            benchmark_function()
+            # Create fresh module for warmup
+            module_name = f"{task_type}_warmup_{uuid.uuid4().hex}"
+            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+            if spec is None or spec.loader is None:
+                continue
+            warmup_module = importlib.util.module_from_spec(spec)
+            
+            # Add appropriate imports
+            if task_type == "triton":
+                warmup_module.__dict__.update({
+                    'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
+                })
+            elif task_type == "pytorch":
+                import torch.nn as nn
+                import torch.nn.functional as F
+                warmup_module.__dict__.update({
+                    'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+                })
+            
+            # Capture output to avoid pollution
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+            
+            spec.loader.exec_module(warmup_module)
             torch.cuda.synchronize()
+            
+            # Restore output
+            sys.stdout, sys.stderr = old_stdout, old_stderr
         except:
             pass  # Ignore warmup failures
     
-    # Actual benchmark runs
+    # Actual benchmark runs - re-execute entire module
     for run_idx in range(benchmark_runs):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         
-        start_time = time.perf_counter()
         try:
-            benchmark_function()
+            # Create fresh module for each benchmark run
+            module_name = f"{task_type}_bench_{run_idx}_{uuid.uuid4().hex}"
+            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+            if spec is None or spec.loader is None:
+                continue
+            bench_module = importlib.util.module_from_spec(spec)
+            
+            # Add appropriate imports
+            if task_type == "triton":
+                bench_module.__dict__.update({
+                    'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
+                })
+            elif task_type == "pytorch":
+                import torch.nn as nn
+                import torch.nn.functional as F
+                bench_module.__dict__.update({
+                    'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+                })
+            
+            # Capture output to avoid pollution
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+            
+            start_time = time.perf_counter()
+            spec.loader.exec_module(bench_module)
             torch.cuda.synchronize()
             end_time = time.perf_counter()
+            
+            # Restore output
+            sys.stdout, sys.stderr = old_stdout, old_stderr
             
             run_time = (end_time - start_time) * 1000  # Convert to ms
             times.append(run_time)
@@ -105,53 +134,75 @@ def _run_benchmark(kernel_module, benchmark_runs):
         "successful_runs": successful_runs
     }
 
-def _run_pytorch_benchmark(kernel_module, benchmark_runs, torch_compile=False, torch_compile_mode="default"):
-    """Run PyTorch-specific benchmarking with optional torch.compile."""
-    
-    # Find benchmark function
-    benchmark_function = None
-    possible_names = ['benchmark_function', 'main', 'test', 'run_test', 'run_benchmark']
-    for name in possible_names:
-        if hasattr(kernel_module, name):
-            benchmark_function = getattr(kernel_module, name)
-            break
-    
-    # If no explicit benchmark function, try to find any callable that's not a built-in
-    if benchmark_function is None:
-        for attr_name in dir(kernel_module):
-            if not attr_name.startswith('_'):
-                attr = getattr(kernel_module, attr_name)
-                if callable(attr) and not isinstance(attr, type):
-                    benchmark_function = attr
-                    break
-    
-    if benchmark_function is None:
-        raise Exception("No benchmarkable function found in the module")
+def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile=False, torch_compile_mode="default"):
+    """Run PyTorch-specific benchmarking by re-executing the entire module multiple times."""
     
     results = {}
     
-    # 1. Regular PyTorch benchmarking
+    # 1. Regular PyTorch benchmarking - re-execute entire module
     regular_times = []
     memory_peaks = []
     
-    # Warmup runs for regular version
+    # Warmup runs (3 runs) - re-execute entire module
     for _ in range(3):
         try:
-            benchmark_function()
+            # Create fresh module for warmup
+            module_name = f"{task_type}_warmup_{uuid.uuid4().hex}"
+            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+            if spec is None or spec.loader is None:
+                continue
+            warmup_module = importlib.util.module_from_spec(spec)
+            
+            # Add appropriate imports
+            import torch.nn as nn
+            import torch.nn.functional as F
+            warmup_module.__dict__.update({
+                'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+            })
+            
+            # Capture output to avoid pollution
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+            
+            spec.loader.exec_module(warmup_module)
             torch.cuda.synchronize()
+            
+            # Restore output
+            sys.stdout, sys.stderr = old_stdout, old_stderr
         except:
-            pass
+            pass  # Ignore warmup failures
     
-    # Benchmark regular version
+    # Benchmark regular version - re-execute entire module
     for run_idx in range(benchmark_runs):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         
-        start_time = time.perf_counter()
         try:
-            benchmark_function()
+            # Create fresh module for each benchmark run
+            module_name = f"{task_type}_bench_{run_idx}_{uuid.uuid4().hex}"
+            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+            if spec is None or spec.loader is None:
+                continue
+            bench_module = importlib.util.module_from_spec(spec)
+            
+            # Add appropriate imports
+            import torch.nn as nn
+            import torch.nn.functional as F
+            bench_module.__dict__.update({
+                'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+            })
+            
+            # Capture output to avoid pollution
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+            
+            start_time = time.perf_counter()
+            spec.loader.exec_module(bench_module)
             torch.cuda.synchronize()
             end_time = time.perf_counter()
+            
+            # Restore output
+            sys.stdout, sys.stderr = old_stdout, old_stderr
             
             run_time = (end_time - start_time) * 1000  # Convert to ms
             regular_times.append(run_time)
@@ -177,35 +228,79 @@ def _run_pytorch_benchmark(kernel_module, benchmark_runs, torch_compile=False, t
     })
     
     # 2. torch.compile benchmarking (if requested)
+    # Note: torch.compile optimization is applied to the entire module execution
+    # This is experimental and may not work for all code patterns
     if torch_compile:
         try:
-            # Compile the function
-            compiled_function = torch.compile(benchmark_function, mode=torch_compile_mode)
-            
-            # Warmup runs for compiled version
-            for _ in range(3):
-                try:
-                    compiled_function()
-                    torch.cuda.synchronize()
-                except:
-                    pass
-            
             compiled_times = []
             
-            # Benchmark compiled version
+            # For torch.compile benchmarking, we'll try to compile the entire module execution
+            # This is experimental and may not always work
             for run_idx in range(benchmark_runs):
                 torch.cuda.empty_cache()
                 
-                start_time = time.perf_counter()
                 try:
-                    compiled_function()
-                    torch.cuda.synchronize()
-                    end_time = time.perf_counter()
+                    # Create fresh module for each compiled benchmark run
+                    module_name = f"{task_type}_compiled_{run_idx}_{uuid.uuid4().hex}"
+                    spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+                    if spec is None or spec.loader is None:
+                        continue
+                    compiled_module = importlib.util.module_from_spec(spec)
                     
-                    run_time = (end_time - start_time) * 1000  # Convert to ms
-                    compiled_times.append(run_time)
+                    # Add appropriate imports
+                    import torch.nn as nn
+                    import torch.nn.functional as F
+                    compiled_module.__dict__.update({
+                        'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+                    })
+                    
+                    # Capture output to avoid pollution
+                    old_stdout, old_stderr = sys.stdout, sys.stderr
+                    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+                    
+                    # Execute the module to define functions, then look for torch.compile opportunities
+                    spec.loader.exec_module(compiled_module)
+                    
+                    # Try to find and compile functions defined in the module
+                    # This is a best-effort approach for torch.compile with entire modules
+                    compiled_functions = {}
+                    for attr_name in dir(compiled_module):
+                        if not attr_name.startswith('_'):
+                            attr = getattr(compiled_module, attr_name)
+                            if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
+                                try:
+                                    compiled_functions[attr_name] = torch.compile(attr, mode=torch_compile_mode)
+                                    # Replace the original function with compiled version
+                                    setattr(compiled_module, attr_name, compiled_functions[attr_name])
+                                except:
+                                    pass  # Skip functions that can't be compiled
+                    
+                    # Re-execute with compiled functions if any were found
+                    if compiled_functions:
+                        # Create a fresh module and execute with compiled functions
+                        fresh_spec = importlib.util.spec_from_file_location(f"{module_name}_fresh", temp_file_path)
+                        fresh_module = importlib.util.module_from_spec(fresh_spec)
+                        fresh_module.__dict__.update({
+                            'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+                        })
+                        # Add compiled functions to the fresh module
+                        for func_name, compiled_func in compiled_functions.items():
+                            fresh_module.__dict__[func_name] = compiled_func
+                        
+                        start_time = time.perf_counter()
+                        fresh_spec.loader.exec_module(fresh_module)
+                        torch.cuda.synchronize()
+                        end_time = time.perf_counter()
+                        
+                        run_time = (end_time - start_time) * 1000  # Convert to ms
+                        compiled_times.append(run_time)
+                    
+                    # Restore output
+                    sys.stdout, sys.stderr = old_stdout, old_stderr
                     
                 except Exception as e:
+                    # Restore output even on error
+                    sys.stdout, sys.stderr = old_stdout, old_stderr
                     continue
             
             if len(compiled_times) > 0:
@@ -347,16 +442,16 @@ def worker_main(task_queue, result_queue, gpu_id):
             if benchmark and status_code == 0:
                 try:
                     if task_type == "triton":
-                        # Use original Triton benchmarking
-                        benchmark_results = _run_benchmark(kernel_module, benchmark_runs)
+                        # Use Triton benchmarking with entire module execution
+                        benchmark_results = _run_benchmark(temp_file_path, task_type, benchmark_runs)
                         benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
                         benchmark_std_time_ms = benchmark_results["std_time_ms"] 
                         benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]
                         benchmark_successful_runs = benchmark_results["successful_runs"]
                         print(f"[Worker PID {os.getpid()}] Triton task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms", file=original_stderr_for_logging, flush=True)
                     elif task_type == "pytorch":
-                        # Use PyTorch-specific benchmarking with optional torch.compile
-                        benchmark_results = _run_pytorch_benchmark(kernel_module, benchmark_runs, torch_compile, torch_compile_mode)
+                        # Use PyTorch-specific benchmarking with entire module execution and optional torch.compile
+                        benchmark_results = _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile, torch_compile_mode)
                         benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
                         benchmark_std_time_ms = benchmark_results["std_time_ms"] 
                         benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]

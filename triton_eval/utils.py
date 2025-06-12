@@ -15,7 +15,7 @@ async def map(ds, func, num_proc=10):
     
     results = []
     n_complete = 0
-    async for input_row, out_row in async_foreach(ds, apply_func, max_concurrent_tasks=num_proc):
+    async for i, input_row, out_row in async_foreach(ds, apply_func, max_concurrent_tasks=num_proc):
         input_row_copy: dict = deepcopy(dict(input_row))
         input_row_copy.update(out_row)
         results.append(input_row_copy)  # Use the copy instead of original
