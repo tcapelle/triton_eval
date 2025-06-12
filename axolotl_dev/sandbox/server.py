@@ -43,11 +43,19 @@ workers_lock: asyncio.Lock  # Forward declaration – real value assigned after 
 # --- End Configuration ---
 
 # Pydantic request/response models
-class CodeExecutionRequest(BaseModel):
+class TritonExecutionRequest(BaseModel):
     code: str
     tests: str
     benchmark: bool = False  # New flag to enable benchmarking
     benchmark_runs: int = 10  # Number of benchmark runs
+
+class PyTorchExecutionRequest(BaseModel):
+    code: str
+    tests: str
+    benchmark: bool = False  # Enable benchmarking
+    benchmark_runs: int = 10  # Number of benchmark runs
+    torch_compile: bool = False  # Enable torch.compile benchmarking
+    torch_compile_mode: str = "default"  # torch.compile mode: "default", "reduce-overhead", "max-autotune"
 
 class CodeExecutionResponse(BaseModel):
     status_code: int
@@ -62,6 +70,10 @@ class CodeExecutionResponse(BaseModel):
     benchmark_std_time_ms: Optional[float] = None
     benchmark_memory_peak_mb: Optional[float] = None
     benchmark_successful_runs: Optional[int] = None
+    # PyTorch specific results
+    torch_compile_benchmark_mean_time_ms: Optional[float] = None
+    torch_compile_benchmark_std_time_ms: Optional[float] = None
+    torch_compile_speedup: Optional[float] = None  # Speedup ratio of compiled vs regular
 
 # --- Lifespan Context Manager ---
 @asynccontextmanager
@@ -371,9 +383,9 @@ def read_root():
     return {"message": "Triton Worker Pool Server is ready!"}
 
 
-@app.post("/run_code", response_model=CodeExecutionResponse)
-async def run_code_endpoint(request: CodeExecutionRequest):
-    """API endpoint to execute code."""
+@app.post("/run_triton", response_model=CodeExecutionResponse)
+async def run_triton_endpoint(request: TritonExecutionRequest):
+    """API endpoint to execute Triton code."""
     # Workers should now always be running unless startup failed or they crashed.
     # Keep the check to handle edge cases like crashes or failed resets.
     if not worker_pool.is_running:
@@ -402,6 +414,7 @@ async def run_code_endpoint(request: CodeExecutionRequest):
     # Create task data with benchmarking info
     task_data = {
         "task_id": task_id,
+        "task_type": "triton",
         "code": code_string,
         "benchmark": request.benchmark,
         "benchmark_runs": request.benchmark_runs
@@ -476,7 +489,119 @@ async def run_code_endpoint(request: CodeExecutionRequest):
          in_flight_requests.pop(task_id, None)
          raise HTTPException(status_code=500, detail="Internal server error processing task result.")
 
-# Removed old on_event decorators as lifespan is used now.
+@app.post("/run_pytorch", response_model=CodeExecutionResponse)
+async def run_pytorch_endpoint(request: PyTorchExecutionRequest):
+    """API endpoint to execute PyTorch code with optional torch.compile benchmarking."""
+    # Workers should now always be running unless startup failed or they crashed.
+    # Keep the check to handle edge cases like crashes or failed resets.
+    if not worker_pool.is_running:
+        # Attempt to (re)start the worker pool automatically instead of immediately failing.
+        console.print("[server] [yellow]Worker pool not running. Attempting automatic restart...[/yellow]")
+        started = await worker_pool.start()
+        if not started:
+            console.print("[server] [bold red]Automatic worker pool restart failed.[/bold red]")
+            raise HTTPException(
+                status_code=503,
+                detail="Workers are not currently operational and automatic restart failed.",
+            )
+
+    task_id = str(uuid.uuid4())
+    code_string = (
+        "from typing import *\n"
+        "import torch\n"
+        "import torch.nn as nn\n"
+        "import torch.nn.functional as F\n"
+        "import time\n"
+        "import gc\n\n"
+        f"{request.code}\n\n"
+        "# ---- Tests Below ----\n"
+        "DEVICE = torch.device('cuda')\n"
+        f"{request.tests}\n"
+    )
+    
+    # Create task data with PyTorch-specific info
+    task_data = {
+        "task_id": task_id,
+        "task_type": "pytorch",
+        "code": code_string,
+        "benchmark": request.benchmark,
+        "benchmark_runs": request.benchmark_runs,
+        "torch_compile": request.torch_compile,
+        "torch_compile_mode": request.torch_compile_mode
+    }
+
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+
+    # Check if workers are available before adding to queue/in_flight
+    # Acquire lock briefly only to add the future, reducing contention
+    async with workers_lock:
+        if not worker_pool.is_running:  # Re-check in case they were stopped before we acquired the lock
+            raise HTTPException(
+                status_code=503,
+                detail="Workers were stopped before the request could be processed.",
+            )
+        in_flight_requests[task_id] = fut  # Add future only if pool is confirmed running
+
+    console.print(f"[server] Received PyTorch request, assigning Task ID: {task_id}")
+    try:
+        # Offload the potentially blocking put operation to a thread so the event loop remains responsive.
+        await asyncio.to_thread(task_queue.put, task_data)
+        # qsize() may not be implemented on some platforms; fall back gracefully.
+        try:
+            q_sz = task_queue.qsize()
+        except (NotImplementedError, AttributeError):
+            q_sz = "unknown"
+        console.print(f"[server] Task {task_id} added to queue (queue size: {q_sz}).")
+    except Exception as e:
+        in_flight_requests.pop(task_id, None) # Clean up future
+        console.print(f"[server] Task {task_id} [bold red]rejected[/bold red]: Error adding to queue: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error queuing task.")
+
+    try:
+        console.print(f"[server] Waiting for PyTorch task {task_id} (timeout: [yellow]{TASK_TIMEOUT_SECONDS}s[/yellow])...")
+        result = await asyncio.wait_for(fut, timeout=TASK_TIMEOUT_SECONDS)
+        console.print(f"[server] PyTorch task {task_id} [green]completed[/green].")
+        return CodeExecutionResponse(
+            status_code=result["status_code"],
+            stdout=result["stdout"],
+            stderr=result["stderr"],
+            # Extract metrics from result dict
+            gpu_mem_used_gb=result.get("gpu_mem_used_gb"),
+            cpu_percent=result.get("cpu_percent"),
+            ram_percent=result.get("ram_percent"),
+            # Extract benchmark metrics
+            benchmark_mean_time_ms=result.get("benchmark_mean_time_ms"),
+            benchmark_std_time_ms=result.get("benchmark_std_time_ms"),
+            benchmark_memory_peak_mb=result.get("benchmark_memory_peak_mb"),
+            benchmark_successful_runs=result.get("benchmark_successful_runs"),
+            # Extract PyTorch-specific metrics
+            torch_compile_benchmark_mean_time_ms=result.get("torch_compile_benchmark_mean_time_ms"),
+            torch_compile_benchmark_std_time_ms=result.get("torch_compile_benchmark_std_time_ms"),
+            torch_compile_speedup=result.get("torch_compile_speedup"),
+        )
+    except asyncio.TimeoutError:
+        console.print(f"[server] PyTorch task {task_id} [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS} seconds.")
+        console.print(f"[server] [yellow]Hint:[/yellow] This might happen if the task took too long, or if the assigned worker process terminated unexpectedly.")
+
+        # The dedicated monitor inside WorkerPool will take care of replacing dead workers.
+        # We just log the timeout here – no manual intervention needed anymore.
+
+        # Note: Future might have already been removed if stop_workers cancelled it
+        in_flight_requests.pop(task_id, None) # Clean up future for timed-out task
+        raise HTTPException(status_code=504, detail=f"Task execution timed out after {TASK_TIMEOUT_SECONDS} seconds.")
+    except asyncio.CancelledError:
+         # Future is already removed/cancelled by kill_workers_internal
+         # Log cancellation without raising HTTPException immediately, as it might be part of a controlled stop/reset
+         console.print(f"[server] PyTorch task {task_id} [yellow]cancelled[/yellow], likely due to worker shutdown or reset.")
+         # Ensure the future is removed from in_flight_requests
+         in_flight_requests.pop(task_id, None)
+         # Raise the HTTPException to inform the client
+         raise HTTPException(status_code=503, detail="Task cancelled, workers may have been stopped or reset.")
+    except Exception as e:
+         console.print(f"[server] [bold red]Error processing result[/bold red] for PyTorch task {task_id}: {e}")
+         in_flight_requests.pop(task_id, None)
+         raise HTTPException(status_code=500, detail="Internal server error processing task result.")
 
 # --- API Endpoints ---
 

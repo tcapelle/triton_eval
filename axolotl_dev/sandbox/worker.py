@@ -10,6 +10,7 @@ import triton.language as tl
 import triton.compiler.errors # Import Triton compiler errors
 import math
 import time
+import gc
 
 import tempfile # Add tempfile
 import importlib.util # Add importlib.util
@@ -104,6 +105,136 @@ def _run_benchmark(kernel_module, benchmark_runs):
         "successful_runs": successful_runs
     }
 
+def _run_pytorch_benchmark(kernel_module, benchmark_runs, torch_compile=False, torch_compile_mode="default"):
+    """Run PyTorch-specific benchmarking with optional torch.compile."""
+    
+    # Find benchmark function
+    benchmark_function = None
+    possible_names = ['benchmark_function', 'main', 'test', 'run_test', 'run_benchmark']
+    for name in possible_names:
+        if hasattr(kernel_module, name):
+            benchmark_function = getattr(kernel_module, name)
+            break
+    
+    # If no explicit benchmark function, try to find any callable that's not a built-in
+    if benchmark_function is None:
+        for attr_name in dir(kernel_module):
+            if not attr_name.startswith('_'):
+                attr = getattr(kernel_module, attr_name)
+                if callable(attr) and not isinstance(attr, type):
+                    benchmark_function = attr
+                    break
+    
+    if benchmark_function is None:
+        raise Exception("No benchmarkable function found in the module")
+    
+    results = {}
+    
+    # 1. Regular PyTorch benchmarking
+    regular_times = []
+    memory_peaks = []
+    
+    # Warmup runs for regular version
+    for _ in range(3):
+        try:
+            benchmark_function()
+            torch.cuda.synchronize()
+        except:
+            pass
+    
+    # Benchmark regular version
+    for run_idx in range(benchmark_runs):
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        
+        start_time = time.perf_counter()
+        try:
+            benchmark_function()
+            torch.cuda.synchronize()
+            end_time = time.perf_counter()
+            
+            run_time = (end_time - start_time) * 1000  # Convert to ms
+            regular_times.append(run_time)
+            
+            peak_memory = torch.cuda.max_memory_allocated() / (1024 * 1024)  # MB
+            memory_peaks.append(peak_memory)
+            
+        except Exception as e:
+            continue
+    
+    if len(regular_times) == 0:
+        raise Exception("No successful regular benchmark runs")
+    
+    regular_mean_time = sum(regular_times) / len(regular_times)
+    regular_std_time = (sum((t - regular_mean_time) ** 2 for t in regular_times) / len(regular_times)) ** 0.5 if len(regular_times) > 1 else 0
+    memory_peak = max(memory_peaks) if memory_peaks else 0
+    
+    results.update({
+        "mean_time_ms": regular_mean_time,
+        "std_time_ms": regular_std_time,
+        "memory_peak_mb": memory_peak,
+        "successful_runs": len(regular_times)
+    })
+    
+    # 2. torch.compile benchmarking (if requested)
+    if torch_compile:
+        try:
+            # Compile the function
+            compiled_function = torch.compile(benchmark_function, mode=torch_compile_mode)
+            
+            # Warmup runs for compiled version
+            for _ in range(3):
+                try:
+                    compiled_function()
+                    torch.cuda.synchronize()
+                except:
+                    pass
+            
+            compiled_times = []
+            
+            # Benchmark compiled version
+            for run_idx in range(benchmark_runs):
+                torch.cuda.empty_cache()
+                
+                start_time = time.perf_counter()
+                try:
+                    compiled_function()
+                    torch.cuda.synchronize()
+                    end_time = time.perf_counter()
+                    
+                    run_time = (end_time - start_time) * 1000  # Convert to ms
+                    compiled_times.append(run_time)
+                    
+                except Exception as e:
+                    continue
+            
+            if len(compiled_times) > 0:
+                compiled_mean_time = sum(compiled_times) / len(compiled_times)
+                compiled_std_time = (sum((t - compiled_mean_time) ** 2 for t in compiled_times) / len(compiled_times)) ** 0.5 if len(compiled_times) > 1 else 0
+                speedup = regular_mean_time / compiled_mean_time if compiled_mean_time > 0 else 0
+                
+                results.update({
+                    "torch_compile_benchmark_mean_time_ms": compiled_mean_time,
+                    "torch_compile_benchmark_std_time_ms": compiled_std_time,
+                    "torch_compile_speedup": speedup
+                })
+            else:
+                results.update({
+                    "torch_compile_benchmark_mean_time_ms": None,
+                    "torch_compile_benchmark_std_time_ms": None,
+                    "torch_compile_speedup": None
+                })
+                
+        except Exception as e:
+            print(f"torch.compile benchmarking failed: {e}", file=original_stderr_for_logging, flush=True)
+            results.update({
+                "torch_compile_benchmark_mean_time_ms": None,
+                "torch_compile_benchmark_std_time_ms": None,
+                "torch_compile_speedup": None
+            })
+    
+    return results
+
 def worker_main(task_queue, result_queue, gpu_id):
     """
     Each worker process runs this function:
@@ -147,13 +278,19 @@ def worker_main(task_queue, result_queue, gpu_id):
         # Handle both old format (tuple) and new format (dict) for backward compatibility
         if isinstance(task_data, tuple):
             task_id, code_string = task_data
+            task_type = "triton"  # Default to triton for backward compatibility
             benchmark = False
             benchmark_runs = 10
+            torch_compile = False
+            torch_compile_mode = "default"
         else:
             task_id = task_data["task_id"]
+            task_type = task_data.get("task_type", "triton")  # Default to triton
             code_string = task_data["code"]
             benchmark = task_data.get("benchmark", False)
             benchmark_runs = task_data.get("benchmark_runs", 10)
+            torch_compile = task_data.get("torch_compile", False)
+            torch_compile_mode = task_data.get("torch_compile_mode", "default")
 
         # Prepare to capture stdout/stderr
         old_stdout, old_stderr = sys.stdout, sys.stderr
@@ -171,6 +308,11 @@ def worker_main(task_queue, result_queue, gpu_id):
         benchmark_std_time_ms = None
         benchmark_memory_peak_mb = None
         benchmark_successful_runs = None
+        
+        # PyTorch-specific benchmark metrics
+        torch_compile_benchmark_mean_time_ms = None
+        torch_compile_benchmark_std_time_ms = None
+        torch_compile_speedup = None
 
         try:
             # Create and write to temporary file
@@ -179,28 +321,57 @@ def worker_main(task_queue, result_queue, gpu_id):
                  tmp.write(code_string)
 
             # Setup module loading
-            module_name = f"triton_kernel_{uuid.uuid4().hex}"
+            module_name = f"{task_type}_kernel_{uuid.uuid4().hex}"
             spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
             if spec is None or spec.loader is None:
                 raise ImportError(f"Could not create module spec for {temp_file_path}")
             kernel_module = importlib.util.module_from_spec(spec)
-            kernel_module.__dict__.update({
-                'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
-            })
+            
+            # Add appropriate imports based on task type
+            if task_type == "triton":
+                kernel_module.__dict__.update({
+                    'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
+                })
+            elif task_type == "pytorch":
+                import torch.nn as nn
+                import torch.nn.functional as F
+                kernel_module.__dict__.update({
+                    'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+                })
 
             # Execute the code
             spec.loader.exec_module(kernel_module)
             # If execution succeeds, status_code remains 0
             
-            # If benchmarking is enabled and execution was successful, run benchmarks
+            # Run benchmarking if enabled and execution was successful
             if benchmark and status_code == 0:
                 try:
-                    benchmark_results = _run_benchmark(kernel_module, benchmark_runs)
-                    benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
-                    benchmark_std_time_ms = benchmark_results["std_time_ms"] 
-                    benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]
-                    benchmark_successful_runs = benchmark_results["successful_runs"]
-                    print(f"[Worker PID {os.getpid()}] Task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms", file=original_stderr_for_logging, flush=True)
+                    if task_type == "triton":
+                        # Use original Triton benchmarking
+                        benchmark_results = _run_benchmark(kernel_module, benchmark_runs)
+                        benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
+                        benchmark_std_time_ms = benchmark_results["std_time_ms"] 
+                        benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]
+                        benchmark_successful_runs = benchmark_results["successful_runs"]
+                        print(f"[Worker PID {os.getpid()}] Triton task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms", file=original_stderr_for_logging, flush=True)
+                    elif task_type == "pytorch":
+                        # Use PyTorch-specific benchmarking with optional torch.compile
+                        benchmark_results = _run_pytorch_benchmark(kernel_module, benchmark_runs, torch_compile, torch_compile_mode)
+                        benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
+                        benchmark_std_time_ms = benchmark_results["std_time_ms"] 
+                        benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]
+                        benchmark_successful_runs = benchmark_results["successful_runs"]
+                        
+                        # Extract torch.compile results if available
+                        torch_compile_benchmark_mean_time_ms = benchmark_results.get("torch_compile_benchmark_mean_time_ms")
+                        torch_compile_benchmark_std_time_ms = benchmark_results.get("torch_compile_benchmark_std_time_ms")
+                        torch_compile_speedup = benchmark_results.get("torch_compile_speedup")
+                        
+                        compile_info = ""
+                        if torch_compile and torch_compile_speedup is not None:
+                            compile_info = f", torch.compile speedup: {torch_compile_speedup:.2f}x"
+                        print(f"[Worker PID {os.getpid()}] PyTorch task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms{compile_info}", file=original_stderr_for_logging, flush=True)
+                        
                 except Exception as bench_e:
                     print(f"[Worker PID {os.getpid()}] Task {task_id} benchmarking failed: {bench_e}", file=original_stderr_for_logging, flush=True)
                     # Keep benchmark metrics as None if benchmarking fails
@@ -267,14 +438,18 @@ def worker_main(task_queue, result_queue, gpu_id):
                 "benchmark_std_time_ms": benchmark_std_time_ms,
                 "benchmark_memory_peak_mb": benchmark_memory_peak_mb,
                 "benchmark_successful_runs": benchmark_successful_runs,
+                # PyTorch-specific results
+                "torch_compile_benchmark_mean_time_ms": torch_compile_benchmark_mean_time_ms,
+                "torch_compile_benchmark_std_time_ms": torch_compile_benchmark_std_time_ms,
+                "torch_compile_speedup": torch_compile_speedup,
             }
             try:
                  result_queue.put(result, timeout=5)
                  # Log success only if no error occurred before finally
                  if status_code == 0:
-                      print(f"[Worker PID {os.getpid()}] Successfully executed and sent result for task {task_id}.", file=original_stderr_for_logging, flush=True)
+                      print(f"[Worker PID {os.getpid()}] Successfully executed and sent result for {task_type} task {task_id}.", file=original_stderr_for_logging, flush=True)
                  else:
-                      print(f"[Worker PID {os.getpid()}] Successfully sent error result for task {task_id}.", file=original_stderr_for_logging, flush=True)
+                      print(f"[Worker PID {os.getpid()}] Successfully sent error result for {task_type} task {task_id}.", file=original_stderr_for_logging, flush=True)
             except Exception as put_e:
                  # Log failure to send result, regardless of task success/failure
                  print(f"[Worker PID {os.getpid()}] Failed to put result to queue for task {task_id}: {put_e}", file=original_stderr_for_logging, flush=True)
