@@ -28,10 +28,10 @@ except:
     # If not in distributed mode or any other error, initialize weave anyway
     weave.init("grpo-cuda/axolotl-grpo")
 
-RUN_ON_SERVER = True  # When True, execute Triton code via the /run_code API instead of locally
+RUN_ON_SERVER = True  # When True, execute Triton code via the /run_triton API instead of locally
 
 SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
-RUN_CODE_ENDPOINT = f"{SERVER_URL}/run_code"
+RUN_TRITON_ENDPOINT = f"{SERVER_URL}/run_triton"
 
 def get_wandb_run():
     if wandb.run is None:
@@ -47,17 +47,22 @@ def wandb_attributes():
         wandb_metrics = {k: v for k, v in dict(run.summary).items() if not k.startswith("_")}
         return weave.attributes(wandb_metrics)
 
-async def _run_code_on_server(code: str, tests: str) -> dict:
-    """Synchronously execute Triton `code` + `tests` on the remote worker pool.
+async def _run_code_on_server(code: str, tests: str, benchmark: bool = True, benchmark_runs: int = 10) -> dict:
+    """Execute Triton `code` + `tests` on the remote worker pool with optional benchmarking.
 
-    Returns a dict compatible with the structure produced by `run_python_code`:
-    `{"stdout": str, "stderr": str, "status_code": int}`
+    Returns a dict with execution results and benchmark metrics:
+    `{"stdout": str, "stderr": str, "status_code": int, "benchmark_mean_time_ms": float, ...}`
     """
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.post(RUN_CODE_ENDPOINT,
-                                     json={"code": code, "tests": tests},
-                                     timeout=180.0)
+            resp = await client.post(RUN_TRITON_ENDPOINT,
+                                     json={
+                                         "code": code, 
+                                         "tests": tests,
+                                         "benchmark": benchmark,
+                                         "benchmark_runs": benchmark_runs
+                                     },
+                                     timeout=300.0)  # Longer timeout for benchmarking
             resp.raise_for_status()
             data = resp.json()
             return data
@@ -105,6 +110,11 @@ REWARD_MAGNITUDES = {
     "exp_penalty": 0.5,
     "language_bonus": 0.1,
     "language_penalty": -0.2,
+    # Performance-based rewards
+    "performance_speedup_base": 1.0,      # Base reward for performance improvements
+    "performance_slowdown_penalty": -0.5, # Penalty for slower kernels
+    "memory_efficiency_bonus": 0.2,       # Bonus for memory efficiency
+    "benchmark_failure_penalty": -0.1,    # Penalty when benchmarking fails
 }
 
 try: # this is not working, we are not saving the reward magnitudes to wandb
@@ -243,7 +253,8 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
 
 
     if RUN_ON_SERVER:
-        triton_output = await _run_code_on_server(triton_code, tests)
+        # Enable benchmarking for performance measurement
+        triton_output = await _run_code_on_server(triton_code, tests, benchmark=True, benchmark_runs=10)
     else:
         # Fallback to local execution (kept for completeness)
         triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
@@ -269,20 +280,49 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
     triton_output.update(result)
     return triton_output
 
-def _compute_code_runs_reward(run_output):
-    "If the code doesn't run, return -1, if it runs but isn't correct, return 0, otherwise return 1"
+def _compute_code_runs_reward(run_output, pytorch_baseline_time=None):
+    """Compute reward for code execution and optional performance."""
     triton_runs = run_output["triton_runs"]
     correct = run_output["correct"]
+    
+    # Base correctness reward
     if not triton_runs:
-        return REWARD_MAGNITUDES["code_runs_fail"]
+        base_reward = REWARD_MAGNITUDES["code_runs_fail"]
     elif not correct:
-        return REWARD_MAGNITUDES["code_runs_incorrect"]
+        base_reward = REWARD_MAGNITUDES["code_runs_incorrect"]
     else:
-        return REWARD_MAGNITUDES["code_runs_correct"]
+        base_reward = REWARD_MAGNITUDES["code_runs_correct"]
+    
+    # Add performance reward if we have baseline data and code is correct
+    performance_reward = 0.0
+    if correct and triton_runs and pytorch_baseline_time is not None:
+        with wandb_attributes():
+            perf_score = performance_scorer(run_output, pytorch_baseline_time)
+        
+        if perf_score["has_benchmark_data"]:
+            speedup = perf_score["speedup"]
+            
+            if speedup > 1.0:
+                # Reward speedups with logarithmic scaling
+                performance_reward = REWARD_MAGNITUDES["performance_speedup_base"] * math.log(speedup)
+            else:
+                # Penalize slowdowns
+                slowdown_factor = max(1.0 - speedup, 0)
+                performance_reward = REWARD_MAGNITUDES["performance_slowdown_penalty"] * slowdown_factor
+            
+            # Memory efficiency bonus
+            memory_mb = perf_score.get("memory_mb", 0)
+            if memory_mb and memory_mb < 50:  # Less than 50MB is quite efficient
+                performance_reward += REWARD_MAGNITUDES["memory_efficiency_bonus"]
+        else:
+            # Penalize when benchmarking fails but code runs
+            performance_reward = REWARD_MAGNITUDES["benchmark_failure_penalty"]
+    
+    return base_reward + performance_reward
 
 @weave.op
-def reward_code_runs(completions, tests, stdout, entrypoint, **kwargs):
-    """Synchronous wrapper around the async implementation."""
+def reward_code_runs(completions, tests, stdout, entrypoint, pytorch_benchmark_times=None, **kwargs):
+    """Synchronous wrapper around the async implementation with optional performance scoring."""
     
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
@@ -291,7 +331,13 @@ def reward_code_runs(completions, tests, stdout, entrypoint, **kwargs):
                  for resp, test, pt_std, entrypt in zip(responses, tests, stdout, entrypoint)]
         with wandb_attributes():
             run_scores = await asyncio.gather(*tasks)
-        return [_compute_code_runs_reward(score) for score in run_scores]
+        
+        # Compute rewards with optional performance baseline
+        if pytorch_benchmark_times:
+            return [_compute_code_runs_reward(score, baseline_time) 
+                   for score, baseline_time in zip(run_scores, pytorch_benchmark_times)]
+        else:
+            return [_compute_code_runs_reward(score) for score in run_scores]
 
     try:
         loop = asyncio.get_running_loop()
@@ -509,3 +555,41 @@ def torch_zeros_reward(completions, **kwargs):
             score = torch_zeros_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["torch_zeros_ok"] if score["uses_torch_zeros"] else 0)
     return rewards
+
+# ===== Performance-Based Rewards =====
+
+@weave.op
+def performance_scorer(triton_benchmark_result: dict, pytorch_baseline_time_ms: float) -> dict:
+    """Score Triton kernel performance against PyTorch baseline."""
+    
+    # Extract benchmark metrics from Triton execution
+    triton_time_ms = triton_benchmark_result.get("benchmark_mean_time_ms")
+    triton_memory_mb = triton_benchmark_result.get("benchmark_memory_peak_mb")
+    triton_successful_runs = triton_benchmark_result.get("benchmark_successful_runs", 0)
+    
+    # Initialize result
+    result = {
+        "has_benchmark_data": False,
+        "speedup": 0.0,
+        "is_faster": False,
+        "memory_mb": triton_memory_mb,
+        "successful_runs": triton_successful_runs
+    }
+    
+    # Check if we have valid benchmark data
+    if (triton_time_ms is not None and 
+        pytorch_baseline_time_ms is not None and 
+        triton_time_ms > 0 and 
+        pytorch_baseline_time_ms > 0 and
+        triton_successful_runs > 0):
+        
+        speedup = pytorch_baseline_time_ms / triton_time_ms
+        result.update({
+            "has_benchmark_data": True,
+            "triton_time_ms": triton_time_ms,
+            "pytorch_time_ms": pytorch_baseline_time_ms,
+            "speedup": speedup,
+            "is_faster": speedup > 1.0,
+        })
+    
+    return result
