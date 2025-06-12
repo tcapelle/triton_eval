@@ -63,7 +63,7 @@ async def call_benchmark_server(pt_code, tests):
                                        "torch_compile": args.torch_compile,
                                        "torch_compile_mode": args.torch_compile_mode
                                    },
-                                   timeout=120.0)
+                                   timeout=args.timeout)
         resp.raise_for_status()
         return resp.json()
 

@@ -34,19 +34,56 @@ def is_fatal_error(exception) -> bool:
     return False
 
 def _run_benchmark(temp_file_path, task_type, benchmark_runs):
-    """Run benchmarking by re-executing the entire module multiple times."""
+    """Run benchmarking with proper warmup to avoid compilation overhead."""
     times = []
     memory_peaks = []
     
-    # Warmup runs (3 runs) - re-execute entire module
-    for _ in range(3):
+    # First, create a baseline module and define all kernels/functions
+    baseline_module_name = f"{task_type}_baseline_{uuid.uuid4().hex}"
+    baseline_spec = importlib.util.spec_from_file_location(baseline_module_name, temp_file_path)
+    if baseline_spec is None or baseline_spec.loader is None:
+        raise Exception("Could not create baseline module spec for benchmarking")
+    
+    baseline_module = importlib.util.module_from_spec(baseline_spec)
+    
+    # Add appropriate imports
+    if task_type == "triton":
+        baseline_module.__dict__.update({
+            'torch': torch, 'triton': triton, 'tl': tl, 'math': math,
+        })
+    elif task_type == "pytorch":
+        import torch.nn as nn
+        import torch.nn.functional as F
+        baseline_module.__dict__.update({
+            'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+        })
+    
+    # Execute the module once to define all kernels and functions
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    baseline_spec.loader.exec_module(baseline_module)
+    sys.stdout, sys.stderr = old_stdout, old_stderr
+    
+    # Find functions that might contain kernel calls (for warmup)
+    benchmark_functions = []
+    for attr_name in dir(baseline_module):
+        if not attr_name.startswith('_'):
+            attr = getattr(baseline_module, attr_name)
+            if callable(attr) and not isinstance(attr, type):
+                benchmark_functions.append((attr_name, attr))
+    
+    # Warmup runs to trigger kernel compilation
+    print(f"[Worker PID {os.getpid()}] Running warmup for {len(benchmark_functions)} function(s)...", file=original_stderr_for_logging, flush=True)
+    
+    for warmup_idx in range(5):  # More warmup runs for Triton
         try:
-            # Create fresh module for warmup
-            module_name = f"{task_type}_warmup_{uuid.uuid4().hex}"
-            spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
-            if spec is None or spec.loader is None:
+            # Create warmup module with same definitions
+            warmup_module_name = f"{task_type}_warmup_{warmup_idx}_{uuid.uuid4().hex}"
+            warmup_spec = importlib.util.spec_from_file_location(warmup_module_name, temp_file_path)
+            if warmup_spec is None or warmup_spec.loader is None:
                 continue
-            warmup_module = importlib.util.module_from_spec(spec)
+                
+            warmup_module = importlib.util.module_from_spec(warmup_spec)
             
             # Add appropriate imports
             if task_type == "triton":
@@ -60,19 +97,21 @@ def _run_benchmark(temp_file_path, task_type, benchmark_runs):
                     'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
                 })
             
-            # Capture output to avoid pollution
+            # Capture output during warmup
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
             
-            spec.loader.exec_module(warmup_module)
+            warmup_spec.loader.exec_module(warmup_module)
             torch.cuda.synchronize()
             
-            # Restore output
             sys.stdout, sys.stderr = old_stdout, old_stderr
         except:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
             pass  # Ignore warmup failures
     
-    # Actual benchmark runs - re-execute entire module
+    print(f"[Worker PID {os.getpid()}] Warmup completed, starting benchmarks...", file=original_stderr_for_logging, flush=True)
+    
+    # Actual benchmark runs with already-compiled kernels
     for run_idx in range(benchmark_runs):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
