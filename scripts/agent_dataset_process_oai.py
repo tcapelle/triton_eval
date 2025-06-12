@@ -21,19 +21,24 @@ from triton_eval.utils import compare_outputs
 """
 PyTorch to Triton Dataset Generation & Fix Script
 
-This script supports three main modes:
+This script supports four main modes:
 
 1. **Generation Mode** (default): 
    - Generates new PyTorch functions and converts them to Triton
    - Creates completely new dataset entries
    - Usage: python agent_dataset_process_oai.py --n_rows 50
 
-2. **Init Mode** (--init):
+2. **PyTorch-Only Mode** (--pytorch_only):
+   - Generates new PyTorch functions with tests but skips Triton conversion
+   - Useful for creating PyTorch-only datasets or when Triton conversion is not needed
+   - Usage: python agent_dataset_process_oai.py --pytorch_only --n_rows 50
+
+3. **Init Mode** (--init):
    - Uses existing samples from a simple dataset file
    - Processes pre-defined function names/descriptions  
    - Usage: python agent_dataset_process_oai.py --init --n_rows 20
 
-3. **Fix Mode** (--fix):
+4. **Fix Mode** (--fix):
    - Loads existing dataset and finds rows where PyTorch runs but Triton conversion failed
    - Re-attempts only the Triton conversion (skips PyTorch generation)
    - Updates the dataset with fixed results
@@ -41,7 +46,7 @@ This script supports three main modes:
 
 Key Features:
 - Batch processing with configurable batch sizes
-- Error collection and cookbook improvement after each batch
+- Error collection and cookbook improvement after each batch (when using Triton)
 - Parallel processing within batches
 - Automatic dataset saving and optional HuggingFace Hub pushing
 - Rich console output with progress tracking
@@ -49,6 +54,9 @@ Key Features:
 Example commands:
 # Generate 100 new rows in batches of 10
 python agent_dataset_process_oai.py --n_rows 100 --batch_size 10 --push
+
+# Generate PyTorch-only dataset
+python agent_dataset_process_oai.py --pytorch_only --n_rows 50 --batch_size 10 --push
 
 # Fix failed Triton conversions in existing dataset  
 python agent_dataset_process_oai.py --fix --input_dataset username/my_dataset --batch_size 5
@@ -73,6 +81,7 @@ class Args:
     verbose: bool = False
     init: bool = False
     fix: bool = False
+    pytorch_only: bool = False
     data_path: Path = Path("./data")
     n_rows: int = 200
     entrypoint: str = "pt_entrypoint"
@@ -110,6 +119,8 @@ if args.fix:
     console.print(Panel.fit("[bold magenta]Fix Mode: Re-attempting failed Triton conversions[/bold magenta]", border_style="magenta"))
 elif args.init:
     console.print(Panel.fit("[bold cyan]Init Mode: Using existing samples[/bold cyan]", border_style="cyan"))
+elif args.pytorch_only:
+    console.print(Panel.fit("[bold yellow]PyTorch-Only Mode: Creating PyTorch functions without Triton conversion[/bold yellow]", border_style="yellow"))
 else:
     console.print(Panel.fit("[bold green]Generation Mode: Creating new functions[/bold green]", border_style="green"))
 
@@ -220,7 +231,7 @@ creativity_user_prompt = """
 Current Dataset:
 {dataset}
 
-Generate a new function that is not in the dataset.
+Generate a new function that is not in the dataset. Try to generate simple functions that are missing from the dataset.
 """
 
 def dump_ds(ds):
@@ -889,32 +900,40 @@ async def generate_row(max_turns: int, function_name: str | None = None, functio
         pt_code, tests, pt_entrypoint = await _run_pytorch_phase(context, max_turns, skip_pt)
 
         # -----------------------------------------------------------------
-        # 3. Triton phase
+        # 3. Triton phase (skipped in pytorch-only mode)
         # -----------------------------------------------------------------
-        triton_output = await _run_triton_phase(context, pt_code, pt_entrypoint, max_turns)
-
-        if isinstance(triton_output, TritonOutput):
-            triton_code = triton_output.triton_code
-            conversion_reasoning = triton_output.conversion_reasoning
-            triton_entrypoint = triton_output.triton_entrypoint
+        if args.pytorch_only:
+            # Skip Triton conversion entirely - set default values
+            triton_code = ""
+            conversion_reasoning = "Skipped (PyTorch-only mode)"
+            triton_entrypoint = ""
+            # Mark as correct since we're not doing Triton conversion
+            context.triton_is_correct = False
         else:
-            triton_code = context.triton_code
-            conversion_reasoning = "Conversion reasoning not captured due to parsing issue"
-            triton_entrypoint = pt_entrypoint
+            triton_output = await _run_triton_phase(context, pt_code, pt_entrypoint, max_turns)
 
-        # Collect insight only when Triton implementation is correct
-        if context.triton_is_correct:
-            collected_errors.append(
-                ErrorContext(
-                    function_name=context.function_name,
-                    function_description=context.function_description,
-                    pt_code=pt_code,
-                    triton_code=triton_code,
-                    triton_error_summary="",  # no error on success
-                    triton_stderr=context.triton_stdout,
-                    conversion_reasoning=conversion_reasoning,
+            if isinstance(triton_output, TritonOutput):
+                triton_code = triton_output.triton_code
+                conversion_reasoning = triton_output.conversion_reasoning
+                triton_entrypoint = triton_output.triton_entrypoint
+            else:
+                triton_code = context.triton_code
+                conversion_reasoning = "Conversion reasoning not captured due to parsing issue"
+                triton_entrypoint = pt_entrypoint
+
+            # Collect insight only when Triton implementation is correct
+            if context.triton_is_correct:
+                collected_errors.append(
+                    ErrorContext(
+                        function_name=context.function_name,
+                        function_description=context.function_description,
+                        pt_code=pt_code,
+                        triton_code=triton_code,
+                        triton_error_summary="",  # no error on success
+                        triton_stderr=context.triton_stdout,
+                        conversion_reasoning=conversion_reasoning,
+                    )
                 )
-            )
 
         # -----------------------------------------------------------------
         # 4. Build flat row data
@@ -1033,8 +1052,9 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
         
     else:
         # Generation mode: create new functions
+        mode_desc = "PyTorch-only functions" if args.pytorch_only else "PyTorch/Triton pairs"
         console_print(Panel(
-            f"[bold blue]🔄 Generating {n_rows} rows with max {max_turns} turns each[/bold blue]",
+            f"[bold blue]🔄 Generating {n_rows} {mode_desc} with max {max_turns} turns each[/bold blue]",
             title="Processing Configuration",
             border_style="blue"
         ))
@@ -1045,26 +1065,41 @@ async def generate_rows(n_rows: int, max_turns: int, rows_to_fix: list = None):
     valid_rows = [pds for pds in pds_list if pds is not None and not isinstance(pds, Exception)]
     exceptions = [pds for pds in pds_list if pds is None or isinstance(pds, Exception)]
     
-    # Filter to only include rows where Triton is correct
-    triton_correct_rows = [row for row in valid_rows if row.get("triton_is_correct", False)]
-    triton_incorrect_rows = [row for row in valid_rows if not row.get("triton_is_correct", False)]
-    
-    # Results summary
-    if args.fix:
-        mode_desc = "fixed rows"
-    else:
-        mode_desc = "generated functions"
+    if args.pytorch_only:
+        # In PyTorch-only mode, consider all rows with working PyTorch as successful
+        pytorch_working_rows = [row for row in valid_rows if row.get("pt_runs", False)]
+        pytorch_failed_rows = [row for row in valid_rows if not row.get("pt_runs", False)]
         
-    result_text = f"[bold green]✅ Successfully processed with correct Triton: {len(triton_correct_rows)}/{len(pds_list)} {mode_desc}[/bold green]"
-    if triton_incorrect_rows:
-        result_text += f"\n[bold yellow]⚠️ Processed but Triton incorrect: {len(triton_incorrect_rows)}/{len(pds_list)} {mode_desc}[/bold yellow]"
-    if exceptions:
-        result_text += f"\n[bold red]❌ Failed with exceptions: {len(exceptions)}/{len(pds_list)} {mode_desc}[/bold red]"
-    
-    console_print(Panel(result_text, title="📈 Final Results", border_style="green"))
-    
-    # Only return rows where Triton is correct
-    return triton_correct_rows
+        # Results summary for PyTorch-only mode
+        result_text = f"[bold green]✅ Successfully processed PyTorch functions: {len(pytorch_working_rows)}/{len(pds_list)}[/bold green]"
+        if pytorch_failed_rows:
+            result_text += f"\n[bold yellow]⚠️ PyTorch generation failed: {len(pytorch_failed_rows)}/{len(pds_list)}[/bold yellow]"
+        if exceptions:
+            result_text += f"\n[bold red]❌ Failed with exceptions: {len(exceptions)}/{len(pds_list)}[/bold red]"
+        
+        console_print(Panel(result_text, title="📈 Final Results", border_style="green"))
+        return pytorch_working_rows
+    else:
+        # Original logic for Triton mode
+        triton_correct_rows = [row for row in valid_rows if row.get("triton_is_correct", False)]
+        triton_incorrect_rows = [row for row in valid_rows if not row.get("triton_is_correct", False)]
+        
+        # Results summary
+        if args.fix:
+            mode_desc = "fixed rows"
+        else:
+            mode_desc = "generated functions"
+            
+        result_text = f"[bold green]✅ Successfully processed with correct Triton: {len(triton_correct_rows)}/{len(pds_list)} {mode_desc}[/bold green]"
+        if triton_incorrect_rows:
+            result_text += f"\n[bold yellow]⚠️ Processed but Triton incorrect: {len(triton_incorrect_rows)}/{len(pds_list)} {mode_desc}[/bold yellow]"
+        if exceptions:
+            result_text += f"\n[bold red]❌ Failed with exceptions: {len(exceptions)}/{len(pds_list)} {mode_desc}[/bold red]"
+        
+        console_print(Panel(result_text, title="📈 Final Results", border_style="green"))
+        
+        # Only return rows where Triton is correct
+        return triton_correct_rows
 
 # ---------------------------------------------------------------------------
 # Error reflection helpers (defined before first use)
@@ -1108,6 +1143,11 @@ def _display_cookbook_update(cookbook_update: "CookbookUpdate") -> None:
 @weave.op
 async def analyze_errors_and_improve_cookbook():
     """Analyze all collected errors and improve the cookbook if needed"""
+    # Skip cookbook analysis in PyTorch-only mode since there are no Triton errors
+    if args.pytorch_only:
+        console_print("[yellow]📚 Cookbook analysis skipped in PyTorch-only mode[/yellow]")
+        return
+        
     if not collected_errors:
         console_print("[yellow]📚 No errors collected - cookbook analysis skipped[/yellow]")
         return
@@ -1320,11 +1360,19 @@ class DatasetProcessor:
         # Reset any global state that previous runs might have left behind
         self.reset_state()
 
+        # Determine the mode based on flags
+        if self.args.fix:
+            mode = "fix"
+        elif self.args.pytorch_only:
+            mode = "pytorch_only"
+        else:
+            mode = "generate"
+
         # All heavy lifting is still performed by the pre-existing async
         # function.  Once that function is fully migrated into the class we can
         # delete this indirection.
         await process_dataset(
-            mode="fix" if self.args.fix else "generate",
+            mode=mode,
             n_rows=self.args.n_rows,
             batch_size=self.args.batch_size,
             max_turns=self.args.max_turns,
@@ -1416,15 +1464,16 @@ class DatasetProcessor:
 
 @weave.op
 async def process_dataset(
-    mode: Literal["generate", "fix"],
+    mode: Literal["generate", "fix", "pytorch_only"],
     n_rows: int = 200,
     batch_size: int = 10,
     max_turns: int = 20,
 ):
     """Unified entry-point for dataset processing.
 
-    mode="generate" → add `n_rows` new PyTorch/Triton pairs
-    mode="fix"      → retry Triton conversion on failing rows
+    mode="generate"     → add `n_rows` new PyTorch/Triton pairs
+    mode="pytorch_only" → add `n_rows` new PyTorch functions without Triton conversion
+    mode="fix"          → retry Triton conversion on failing rows
     """
 
     DatasetProcessor.reset_state()
