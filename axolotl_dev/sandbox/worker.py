@@ -228,80 +228,121 @@ def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_comp
     })
     
     # 2. torch.compile benchmarking (if requested)
-    # Note: torch.compile optimization is applied to the entire module execution
-    # This is experimental and may not work for all code patterns
     if torch_compile:
         try:
             compiled_times = []
             
-            # For torch.compile benchmarking, we'll try to compile the entire module execution
-            # This is experimental and may not always work
-            for run_idx in range(benchmark_runs):
-                torch.cuda.empty_cache()
+            # First, create a baseline module and identify functions that can be compiled
+            baseline_module_name = f"{task_type}_baseline_{uuid.uuid4().hex}"
+            baseline_spec = importlib.util.spec_from_file_location(baseline_module_name, temp_file_path)
+            if baseline_spec is None or baseline_spec.loader is None:
+                raise Exception("Could not create baseline module spec for torch.compile")
+            
+            baseline_module = importlib.util.module_from_spec(baseline_spec)
+            import torch.nn as nn
+            import torch.nn.functional as F
+            baseline_module.__dict__.update({
+                'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+            })
+            
+            # Capture output during baseline execution
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+            baseline_spec.loader.exec_module(baseline_module)
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+            
+            # Find functions that can be compiled
+            compiled_functions = {}
+            for attr_name in dir(baseline_module):
+                if not attr_name.startswith('_'):
+                    attr = getattr(baseline_module, attr_name)
+                    if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
+                        try:
+                            compiled_functions[attr_name] = torch.compile(attr, mode=torch_compile_mode)
+                        except:
+                            pass  # Skip functions that can't be compiled
+            
+            if not compiled_functions:
+                # No functions could be compiled, skip torch.compile benchmarking
+                results.update({
+                    "torch_compile_benchmark_mean_time_ms": None,
+                    "torch_compile_benchmark_std_time_ms": None,
+                    "torch_compile_speedup": None
+                })
+            else:
+                # Warmup the compiled functions to trigger compilation
+                print(f"[Worker PID {os.getpid()}] Running torch.compile warmup for {len(compiled_functions)} function(s)...", file=original_stderr_for_logging, flush=True)
                 
-                try:
-                    # Create fresh module for each compiled benchmark run
-                    module_name = f"{task_type}_compiled_{run_idx}_{uuid.uuid4().hex}"
-                    spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
-                    if spec is None or spec.loader is None:
-                        continue
-                    compiled_module = importlib.util.module_from_spec(spec)
-                    
-                    # Add appropriate imports
-                    import torch.nn as nn
-                    import torch.nn.functional as F
-                    compiled_module.__dict__.update({
-                        'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
-                    })
-                    
-                    # Capture output to avoid pollution
-                    old_stdout, old_stderr = sys.stdout, sys.stderr
-                    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
-                    
-                    # Execute the module to define functions, then look for torch.compile opportunities
-                    spec.loader.exec_module(compiled_module)
-                    
-                    # Try to find and compile functions defined in the module
-                    # This is a best-effort approach for torch.compile with entire modules
-                    compiled_functions = {}
-                    for attr_name in dir(compiled_module):
-                        if not attr_name.startswith('_'):
-                            attr = getattr(compiled_module, attr_name)
-                            if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
-                                try:
-                                    compiled_functions[attr_name] = torch.compile(attr, mode=torch_compile_mode)
-                                    # Replace the original function with compiled version
-                                    setattr(compiled_module, attr_name, compiled_functions[attr_name])
-                                except:
-                                    pass  # Skip functions that can't be compiled
-                    
-                    # Re-execute with compiled functions if any were found
-                    if compiled_functions:
-                        # Create a fresh module and execute with compiled functions
-                        fresh_spec = importlib.util.spec_from_file_location(f"{module_name}_fresh", temp_file_path)
-                        fresh_module = importlib.util.module_from_spec(fresh_spec)
-                        fresh_module.__dict__.update({
+                # Run multiple warmup passes with compiled functions
+                for warmup_idx in range(5):  # More warmup runs for torch.compile
+                    try:
+                        warmup_module_name = f"{task_type}_warmup_compiled_{warmup_idx}_{uuid.uuid4().hex}"
+                        warmup_spec = importlib.util.spec_from_file_location(warmup_module_name, temp_file_path)
+                        if warmup_spec is None or warmup_spec.loader is None:
+                            continue
+                            
+                        warmup_module = importlib.util.module_from_spec(warmup_spec)
+                        warmup_module.__dict__.update({
                             'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
                         })
-                        # Add compiled functions to the fresh module
+                        
+                        # Replace functions with compiled versions BEFORE executing
                         for func_name, compiled_func in compiled_functions.items():
-                            fresh_module.__dict__[func_name] = compiled_func
+                            warmup_module.__dict__[func_name] = compiled_func
+                        
+                        # Capture output during warmup
+                        old_stdout, old_stderr = sys.stdout, sys.stderr
+                        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+                        
+                        warmup_spec.loader.exec_module(warmup_module)
+                        torch.cuda.synchronize()
+                        
+                        sys.stdout, sys.stderr = old_stdout, old_stderr
+                    except:
+                        sys.stdout, sys.stderr = old_stdout, old_stderr
+                        pass  # Ignore warmup failures
+                
+                print(f"[Worker PID {os.getpid()}] torch.compile warmup completed, starting benchmarks...", file=original_stderr_for_logging, flush=True)
+                
+                # Now run actual benchmark runs with properly warmed-up compiled functions
+                for run_idx in range(benchmark_runs):
+                    torch.cuda.empty_cache()
+                    
+                    try:
+                        # Create fresh module for each compiled benchmark run
+                        module_name = f"{task_type}_compiled_{run_idx}_{uuid.uuid4().hex}"
+                        spec = importlib.util.spec_from_file_location(module_name, temp_file_path)
+                        if spec is None or spec.loader is None:
+                            continue
+                            
+                        compiled_module = importlib.util.module_from_spec(spec)
+                        compiled_module.__dict__.update({
+                            'torch': torch, 'nn': nn, 'F': F, 'math': math, 'time': time, 'gc': gc,
+                        })
+                        
+                        # Replace functions with already-warmed compiled versions BEFORE executing
+                        for func_name, compiled_func in compiled_functions.items():
+                            compiled_module.__dict__[func_name] = compiled_func
+                        
+                        # Capture output to avoid pollution
+                        old_stdout, old_stderr = sys.stdout, sys.stderr
+                        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
                         
                         start_time = time.perf_counter()
-                        fresh_spec.loader.exec_module(fresh_module)
+                        spec.loader.exec_module(compiled_module)
                         torch.cuda.synchronize()
                         end_time = time.perf_counter()
                         
+                        # Restore output
+                        sys.stdout, sys.stderr = old_stdout, old_stderr
+                        
                         run_time = (end_time - start_time) * 1000  # Convert to ms
                         compiled_times.append(run_time)
-                    
-                    # Restore output
-                    sys.stdout, sys.stderr = old_stdout, old_stderr
-                    
-                except Exception as e:
-                    # Restore output even on error
-                    sys.stdout, sys.stderr = old_stdout, old_stderr
-                    continue
+                        
+                    except Exception as e:
+                        # Restore output even on error
+                        sys.stdout, sys.stderr = old_stdout, old_stderr
+                        continue
             
             if len(compiled_times) > 0:
                 compiled_mean_time = sum(compiled_times) / len(compiled_times)
