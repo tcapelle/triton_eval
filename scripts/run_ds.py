@@ -14,7 +14,7 @@ console = Console()
 class Args:
     debug: bool = False
     input_dataset: str = "tcapelle/boostrap_oai_pt_think"
-    output_dataset: str = "tcapelle/boostrap_oai_pt_think"
+    output_dataset: str = None
     weave_project: str = "grpo-cuda/dataset_map"
     push: bool = False
     num_proc: int = 10
@@ -24,16 +24,17 @@ class Args:
     tests_row: str = "tests"
     # PyTorch-specific benchmarking options
     benchmark: bool = True
-    benchmark_runs: int = 10
+    benchmark_runs: int = 100
     torch_compile: bool = True
     torch_compile_mode: str = "default"  # "default", "reduce-overhead", "max-autotune"
 
 args = sp.parse(Args)
 
+output_dataset = args.input_dataset if args.output_dataset is None else args.output_dataset
 
 def load_ds(dataset_name):
     if "/" in dataset_name:
-        return load_dataset(dataset_name)["train"]
+        return load_dataset(dataset_name, revision="234e7f10b89ecbe46f293421349a88123cc92d99")["train"]
     else:
         return load_from_disk(dataset_name)["train"]
 
@@ -102,12 +103,8 @@ async def run_code(row):
         "has_torch_compile_data": result.get("torch_compile_benchmark_mean_time_ms") is not None,
     }
     
-    # Add any other fields from the original row that we want to preserve
-    for key, value in row.items():
-        if key not in enhanced_result:
-            enhanced_result[key] = value
-
-    return enhanced_result
+    row.update(enhanced_result)
+    return row
     
 
 console.rule("[bold blue]Processing dataset[/bold blue]")
@@ -123,7 +120,7 @@ async def process_ds():
 pds = asyncio.run(process_ds())
 
 # Save locally with benchmark info in the name
-output_name = args.output_dataset.replace("/", "_")
+output_name = output_dataset.replace("/", "_")
 if args.benchmark:
     output_name += "_benchmarked"
 if args.torch_compile:
@@ -132,8 +129,8 @@ if args.torch_compile:
 pds.save_to_disk(output_name)
 
 if args.push:
-    pds.push_to_hub(args.output_dataset)
-    console.print(f"Pushed to hub: {args.output_dataset}")
+    pds.push_to_hub(output_dataset)
+    console.print(f"Pushed to hub: {output_dataset}")
 
 console.print(f"[bold green]Dataset processing complete![/bold green]")
 console.print(f"Processed {len(pds)} samples")
@@ -151,6 +148,3 @@ if args.benchmark:
     console.print(f"  With benchmark data: {benchmark_data_count}/{len(pds)} ({benchmark_data_count/len(pds)*100:.1f}%)")
     if args.torch_compile:
         console.print(f"  With torch.compile data: {torch_compile_count}/{len(pds)} ({torch_compile_count/len(pds)*100:.1f}%)")
-
-    # print the first row
-    console.print(pds[0])
