@@ -20,7 +20,7 @@ import fasttext
 
 # ----------  Normalisation --------------------------------------------------
 _LATEX   = re.compile(r'\$.*?\$|\\\[.*?\\\]|\\begin\{.*?\}.*?\\end\{.*?\}', re.S)
-_CODE    = re.compile(r'```.*?```', re.S)
+_CODE    = re.compile(r'```.*?```|<triton>.*?</triton>', re.S)
 
 def strip_noise(text: str) -> str:
     """Remove LaTeX and fenced-code so the language classifier stays honest."""
@@ -84,7 +84,9 @@ def language_reward(problem: str,
     return bonus if off_cnt == 0 else penalty * off_cnt / len(parts)
 
 # ----------  Optional fast path ---------------------------------------------
-_NON_LATIN = re.compile(r'[\u0400-\u052F\u2DE0-\u2DFF\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')  # Cyrillic + Hiragana + Katakana + CJK
+# Comprehensive Unicode ranges for non-Latin scripts (excludes Latin Extended which is still Latin)
+_NON_LATIN = re.compile(r'[\u0370-\u03FF\u0400-\u052F\u0530-\u058F\u0590-\u05FF\u0600-\u06FF\u0700-\u074F\u0750-\u077F\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0D80-\u0DFF\u0E00-\u0E7F\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u10A0-\u10FF\u1100-\u11FF\u1200-\u137F\u1780-\u17FF\u1800-\u18AF\u2DE0-\u2DFF\u3040-\u309F\u30A0-\u30FF\u3130-\u318F\u4E00-\u9FFF\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
+# Covers: Greek, Cyrillic, Armenian, Hebrew, Arabic, Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam, Sinhala, Thai, Lao, Tibetan, Myanmar, Georgian, Hangul, Ethiopic, Khmer, Mongolian, Hiragana, Katakana, CJK
 
 def quick_check(text: str) -> bool:
     """True iff text contains only (extended) Latin; false triggers penalty."""
