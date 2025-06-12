@@ -7,14 +7,14 @@ from prompts import eval_system_prompt, eval_user_prompt
 
 @dataclass
 class Args:
-    ds_name: str = "tcapelle/boostrap_triton_ran"
+    ds_name: str = "tcapelle/boostrap_oai_pt"
     debug: bool = False
     pt_col: str = "pt_code"
     triton_col: str = "triton_code"
     entrypoint_col: str = "pt_entrypoint"
     reasoning_col: str = None
     code_token: str = "triton"
-    reasoning_token: str = "reasoning"
+    reasoning_token: str = "think"
 
 args = sp.parse(Args)
 
@@ -38,10 +38,12 @@ def format_example(example):
         triton_code = example[args.triton_col]
         output = f"<{args.reasoning_token}>\n{reasoning}\n</{args.reasoning_token}>\n\n3. Triton Code:\n<{args.code_token}>\n{triton_code}\n</{args.code_token}>"
         messages.append({"role": "assistant", "content": output})
+    else:
+        messages.append({"role": "assistant", "content": f"<{args.reasoning_token}>\n"})
 
 
     return {
-        "messages": messages,
+        "prompt": messages,
         "entrypoint": entrypoint,
     }
 
