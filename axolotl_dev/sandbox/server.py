@@ -46,6 +46,8 @@ workers_lock: asyncio.Lock  # Forward declaration – real value assigned after 
 class CodeExecutionRequest(BaseModel):
     code: str
     tests: str
+    benchmark: bool = False  # New flag to enable benchmarking
+    benchmark_runs: int = 10  # Number of benchmark runs
 
 class CodeExecutionResponse(BaseModel):
     status_code: int
@@ -55,6 +57,11 @@ class CodeExecutionResponse(BaseModel):
     gpu_mem_used_gb: Optional[float] = None
     cpu_percent: Optional[float] = None
     ram_percent: Optional[float] = None
+    # Benchmarking results (only populated if enable_benchmarking=True and code runs successfully)
+    benchmark_mean_time_ms: Optional[float] = None
+    benchmark_std_time_ms: Optional[float] = None
+    benchmark_memory_peak_mb: Optional[float] = None
+    benchmark_successful_runs: Optional[int] = None
 
 # --- Lifespan Context Manager ---
 @asynccontextmanager
@@ -229,7 +236,7 @@ class WorkerPool:
             console.print(f"[pool] Sending poison pills...")
             for _ in self._workers:
                 try:
-                    self.task_queue.put_nowait((None, None))
+                    self.task_queue.put_nowait(None)  # Updated poison pill format
                 except multiprocessing.queues.Full:
                     console.print("[pool] [yellow]Task queue full while sending poison pills.[/yellow]")
                 except Exception as exc:
@@ -391,6 +398,14 @@ async def run_code_endpoint(request: CodeExecutionRequest):
         "DEVICE = torch.device('cuda')\n"
         f"{request.tests}\n"
     )
+    
+    # Create task data with benchmarking info
+    task_data = {
+        "task_id": task_id,
+        "code": code_string,
+        "benchmark": request.benchmark,
+        "benchmark_runs": request.benchmark_runs
+    }
 
     loop = asyncio.get_event_loop()
     fut = loop.create_future()
@@ -408,7 +423,7 @@ async def run_code_endpoint(request: CodeExecutionRequest):
     console.print(f"[server] Received request, assigning Task ID: {task_id}")
     try:
         # Offload the potentially blocking put operation to a thread so the event loop remains responsive.
-        await asyncio.to_thread(task_queue.put, (task_id, code_string))
+        await asyncio.to_thread(task_queue.put, task_data)
         # qsize() may not be implemented on some platforms; fall back gracefully.
         try:
             q_sz = task_queue.qsize()
@@ -432,6 +447,11 @@ async def run_code_endpoint(request: CodeExecutionRequest):
             gpu_mem_used_gb=result.get("gpu_mem_used_gb"),
             cpu_percent=result.get("cpu_percent"),
             ram_percent=result.get("ram_percent"),
+            # Extract benchmark metrics
+            benchmark_mean_time_ms=result.get("benchmark_mean_time_ms"),
+            benchmark_std_time_ms=result.get("benchmark_std_time_ms"),
+            benchmark_memory_peak_mb=result.get("benchmark_memory_peak_mb"),
+            benchmark_successful_runs=result.get("benchmark_successful_runs"),
         )
     except asyncio.TimeoutError:
         console.print(f"[server] Task {task_id} [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS} seconds.")
@@ -472,6 +492,7 @@ async def reset_workers_endpoint():
     else:
         console.print("[server] [bold red]Failed to reset workers.[/bold red]")
         raise HTTPException(status_code=500, detail="Failed to reset workers.")
+
 
 # If you want to run with uvicorn directly from this file:
 if __name__ == "__main__":
