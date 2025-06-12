@@ -5,7 +5,7 @@ import simple_parsing as sp
 
 @dataclass
 class ScriptArgs:
-    model_name: str = "Qwen/Qwen2.5-14B-Instruct"
+    model_name: str = "qwen3-14b-boot-instruct2"
     ip: str = "127.0.0.1"
     port: int = 8000
 
