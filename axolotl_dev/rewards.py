@@ -29,7 +29,7 @@ except:
     weave.init("grpo-cuda/axolotl-grpo")
 
 RUN_ON_SERVER = True  # When True, execute Triton code via the /run_triton API instead of locally
-
+BENCHMARK_RUNS = 10
 SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
 RUN_TRITON_ENDPOINT = f"{SERVER_URL}/run_triton"
 
@@ -47,7 +47,7 @@ def wandb_attributes():
         wandb_metrics = {k: v for k, v in dict(run.summary).items() if not k.startswith("_")}
         return weave.attributes(wandb_metrics)
 
-async def _run_code_on_server(code: str, tests: str, benchmark: bool = True, benchmark_runs: int = 10) -> dict:
+async def _run_code_on_server(code: str, tests: str, benchmark: bool = True, benchmark_runs: int = BENCHMARK_RUNS) -> dict:
     """Execute Triton `code` + `tests` on the remote worker pool with optional benchmarking.
 
     Returns a dict with execution results and benchmark metrics:
@@ -254,7 +254,7 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
 
     if RUN_ON_SERVER:
         # Enable benchmarking for performance measurement
-        triton_output = await _run_code_on_server(triton_code, tests, benchmark=True, benchmark_runs=10)
+        triton_output = await _run_code_on_server(triton_code, tests, benchmark=True, benchmark_runs=BENCHMARK_RUNS)
     else:
         # Fallback to local execution (kept for completeness)
         triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
