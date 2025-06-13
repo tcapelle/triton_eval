@@ -33,8 +33,12 @@ def is_fatal_error(exception) -> bool:
 
     return False
 
-def _run_benchmark(temp_file_path, task_type, benchmark_runs):
+def _run_benchmark(temp_file_path, task_type, benchmark_runs, original_stderr_for_logging=None):
     """Run benchmarking with proper warmup to avoid compilation overhead."""
+    # Fallback to stderr if not provided
+    if original_stderr_for_logging is None:
+        original_stderr_for_logging = sys.stderr
+        
     times = []
     memory_peaks = []
     
@@ -562,7 +566,7 @@ def worker_main(task_queue, result_queue, gpu_id):
                 try:
                     if task_type == "triton":
                         # Use Triton benchmarking with entire module execution
-                        benchmark_results = _run_benchmark(temp_file_path, task_type, benchmark_runs)
+                        benchmark_results = _run_benchmark(temp_file_path, task_type, benchmark_runs, original_stderr_for_logging)
                         benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
                         benchmark_std_time_ms = benchmark_results["std_time_ms"] 
                         benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]

@@ -50,25 +50,21 @@ def wandb_attributes():
 async def _run_code_on_server(code: str, tests: str, benchmark: bool = True, benchmark_runs: int = BENCHMARK_RUNS) -> dict:
     """Execute Triton `code` + `tests` on the remote worker pool with optional benchmarking.
 
-    Returns a dict with execution results and benchmark metrics:
-    `{"stdout": str, "stderr": str, "status_code": int, "benchmark_mean_time_ms": float, ...}`
+    Returns a dict with execution results and benchmark metrics with "triton_" prefix:
+    `{"triton_stdout": str, "triton_stderr": str, "triton_status_code": int, "triton_benchmark_mean_time_ms": float, ...}`
     """
-    # Default response structure that matches CodeExecutionResponse model
+    # Default response structure for Triton execution (all fields prefixed with "triton_")
     default_response = {
-        "status_code": -1,
-        "stdout": "",
-        "stderr": "",
-        "gpu_mem_used_gb": None,
-        "cpu_percent": None,
-        "ram_percent": None,
-        "benchmark_mean_time_ms": None,
-        "benchmark_std_time_ms": None,
-        "benchmark_memory_peak_mb": None,
-        "benchmark_successful_runs": None,
-        # PyTorch-specific fields (not used for Triton but included for consistency)
-        "torch_compile_benchmark_mean_time_ms": None,
-        "torch_compile_benchmark_std_time_ms": None,
-        "torch_compile_speedup": None,
+        "triton_status_code": -1,
+        "triton_stdout": "",
+        "triton_stderr": "",
+        "triton_gpu_mem_used_gb": None,
+        "triton_cpu_percent": None,
+        "triton_ram_percent": None,
+        "triton_benchmark_mean_time_ms": None,
+        "triton_benchmark_std_time_ms": None,
+        "triton_benchmark_memory_peak_mb": None,
+        "triton_benchmark_successful_runs": None,
     }
     
     async with httpx.AsyncClient() as client:
@@ -83,16 +79,22 @@ async def _run_code_on_server(code: str, tests: str, benchmark: bool = True, ben
                                      timeout=300.0)  # Longer timeout for benchmarking
             resp.raise_for_status()
             data = resp.json()
-            return data
+            
+            # Convert server response to triton_-prefixed format
+            triton_data = {}
+            for key, value in data.items():
+                triton_data[f"triton_{key}"] = value
+            
+            return triton_data
         except httpx.HTTPStatusError as e:
             # 503, 504, 500… – treat as execution failure
             error_response = default_response.copy()
-            error_response.update({"stderr": str(e), "status_code": -1})
+            error_response.update({"triton_stderr": str(e), "triton_status_code": -1})
             return error_response
         except Exception as e:
             # Network or other unexpected error
             error_response = default_response.copy()
-            error_response.update({"stderr": str(e), "status_code": -1})
+            error_response.update({"triton_stderr": str(e), "triton_status_code": -1})
             return error_response
 
 def reset_rewards_server(completions, **kwargs):
@@ -286,10 +288,10 @@ async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, en
             return {"triton_runs": False, "correct": False}
 
     # check correctness
-    runs = triton_output["status_code"] == 0
+    runs = triton_output["triton_status_code"] == 0
 
     # simple stdout string match
-    correct = pytorch_code_output == triton_output["stdout"] and runs
+    correct = pytorch_code_output == triton_output["triton_stdout"] and runs
 
     result = {
         "triton_runs": runs,
@@ -606,7 +608,7 @@ def performance_scorer(triton_benchmark_result: dict, pytorch_baseline_time_ms: 
     """Score Triton kernel performance against pure PyTorch baseline (not torch.compile).
     
     Args:
-        triton_benchmark_result: Dict containing Triton execution and benchmark results
+        triton_benchmark_result: Dict containing Triton execution and benchmark results (with triton_ prefix)
         pytorch_baseline_time_ms: Pure PyTorch execution time in milliseconds (from dataset)
         pytorch_baseline_memory_mb: Pure PyTorch memory usage in MB (from dataset, optional)
         
@@ -614,10 +616,10 @@ def performance_scorer(triton_benchmark_result: dict, pytorch_baseline_time_ms: 
         Dict with performance metrics including speedup, memory efficiency, etc.
     """
     
-    # Extract benchmark metrics from Triton execution
-    triton_time_ms = triton_benchmark_result.get("benchmark_mean_time_ms")
-    triton_memory_mb = triton_benchmark_result.get("benchmark_memory_peak_mb")
-    triton_successful_runs = triton_benchmark_result.get("benchmark_successful_runs", 0)
+    # Extract benchmark metrics from Triton execution (with triton_ prefix)
+    triton_time_ms = triton_benchmark_result.get("triton_benchmark_mean_time_ms")
+    triton_memory_mb = triton_benchmark_result.get("triton_benchmark_memory_peak_mb")
+    triton_successful_runs = triton_benchmark_result.get("triton_benchmark_successful_runs", 0)
     
     # Initialize result
     result = {
