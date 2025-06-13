@@ -1,4 +1,4 @@
-base_model: Qwen/Qwen3-4B
+base_model: /model-checkpoints/sft-qwen4b-boot/
 # base_model: /workspace/data/axolotl-artifacts/grpo-beta-zero
 # Automatically upload checkpoint and final model to HF
 # hub_model_id: username/custom_model_name
@@ -12,10 +12,14 @@ strict: false
 rl: grpo
 trl:
   beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.3 # as in mistral paper
+  loss_type: dr_grpo # default -> bnpo
+  scale_rewards: false # default -> true, should be false for dr_grpo
   max_completion_length: 8192
-  num_generations: 16
+  num_generations: 12
   use_vllm: true
-  vllm_server_host: "axolotl-vllm-service"
+  vllm_server_host: 0.0.0.0
   vllm_server_port: 8000
   reward_funcs:
     - rewards.think_reward
@@ -32,10 +36,11 @@ trl:
     vllm_gpu_memory_utilization: 0.9
 
 
-chat_template: qwen3
+chat_template: qwen_25
 datasets:
-  - path: tcapelle/train_ds_triton
-    split: debug
+  - path: tcapelle/boostrap_oai_pt_think ## ok
+    split: train
+    field_messages: prompt
 dataset_prepared_path: /workspace/data/last_run_prepared
 skip_prepare_dataset: true
 val_set_size: 0.0
@@ -58,13 +63,13 @@ wandb_name: grpo-qwen3-4b
 wandb_log_model: checkpoint
 
 gradient_accumulation_steps: 3
-micro_batch_size: 8  # should match num_generations / num_gpus
-num_epochs: 1
+micro_batch_size: 4  # should match num_generations / num_gpus
+num_epochs: 3
 
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
-learning_rate: 5.0e-7
-max_grad_norm: 0.5
+learning_rate: 1.0e-4
+max_grad_norm: 1.0e-4
 weight_decay: 0.01
 
 bf16: true
@@ -83,3 +88,4 @@ save_total_limit: 2
 save_only_model: true
 
 gc_steps: 1
+deepspeed: deepspeed_configs/zero2.json
