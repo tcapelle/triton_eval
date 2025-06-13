@@ -198,9 +198,9 @@ def is_valid_kernel(src: str, entrypoint: str) -> dict:
     """
     try:
         tree = ast.parse(src)
-    except SyntaxError as e:
-        # Malformed code - return generic message without details
-        return {'is_valid': False, 'reason': 'Syntax error parsing source code.'}
+    except Exception as e:
+        # Any parsing error - return generic message without details
+        return {'is_valid': False, 'reason': 'Error parsing source code.'}
 
     checker = TritonKernelSanityChecker(entrypoint_name=entrypoint)
     checker.visit(tree)
