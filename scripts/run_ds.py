@@ -13,7 +13,7 @@ console = Console()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/boostrap_oai_pt_think"
+    input_dataset: str = "tcapelle/boostrap_oai_pt"
     output_dataset: str = None
     weave_project: str = "grpo-cuda/dataset_map"
     push: bool = False
@@ -22,6 +22,7 @@ class Args:
     server_url: str = "http://127.0.0.1:9347"
     code_row: str = "pt_code"
     tests_row: str = "tests"
+    entrypoint_row: str = "pt_entrypoint"  # Optional column name containing the function to torch.compile
     # PyTorch-specific benchmarking options
     benchmark: bool = True
     benchmark_runs: int = 100
@@ -36,7 +37,12 @@ def load_ds(dataset_name):
     if "/" in dataset_name:
         return load_dataset(dataset_name, revision="234e7f10b89ecbe46f293421349a88123cc92d99")["train"]
     else:
-        return load_from_disk(dataset_name)["train"]
+        ds = load_from_disk(dataset_name)
+        # Handle both split and non-split datasets
+        if hasattr(ds, 'keys') and 'train' in ds:
+            return ds["train"]
+        else:
+            return ds
 
 console.rule(f"[bold blue]Loading dataset: {args.input_dataset}[/bold blue]")
 
@@ -53,17 +59,22 @@ weave.init(args.weave_project)
 
 
 @weave.op
-async def call_benchmark_server(pt_code, tests):
+async def call_benchmark_server(pt_code, tests, entrypoint=None):
+    """Run benchmark with PyTorch and torch.compile"""
     async with httpx.AsyncClient() as client:
+        payload = {
+            "code": pt_code,
+            "tests": tests,
+            "benchmark": args.benchmark,
+            "benchmark_runs": args.benchmark_runs,
+            "torch_compile": args.torch_compile,
+            "torch_compile_mode": args.torch_compile_mode
+        }
+        if entrypoint:
+            payload["entrypoint"] = entrypoint
+            
         resp = await client.post(f"{args.server_url}/run_pytorch", 
-                                   json={
-                                       "code": pt_code,
-                                       "tests": tests,
-                                       "benchmark": args.benchmark,
-                                       "benchmark_runs": args.benchmark_runs,
-                                       "torch_compile": args.torch_compile,
-                                       "torch_compile_mode": args.torch_compile_mode
-                                   },
+                                   json=payload,
                                    timeout=args.timeout)
         resp.raise_for_status()
         return resp.json()
@@ -72,32 +83,25 @@ async def call_benchmark_server(pt_code, tests):
 async def run_code(row):
     pt_code = row[args.code_row]
     tests = row[args.tests_row]
+    
+    # Extract entrypoint if specified
+    entrypoint = None
+    if args.entrypoint_row and args.entrypoint_row in row:
+        entrypoint = row[args.entrypoint_row]
 
-    result = await call_benchmark_server(pt_code, tests)
+    # Run benchmark - this single call returns both PyTorch and torch.compile metrics
+    result = await call_benchmark_server(pt_code, tests, entrypoint)
+    
 
-    # Extract all the benchmark information and add it to the result
+
+    # Use the server response directly and add our custom fields
     enhanced_result = {
         # Original fields
         "pt_code": pt_code,
         "tests": tests,
-        # Server execution results
-        "status_code": result["status_code"],
-        "stdout": result["stdout"], 
-        "stderr": result["stderr"],
-        # System metrics
-        "gpu_mem_used_gb": result.get("gpu_mem_used_gb"),
-        "cpu_percent": result.get("cpu_percent"),
-        "ram_percent": result.get("ram_percent"),
-        # Benchmark metrics
-        "benchmark_mean_time_ms": result.get("benchmark_mean_time_ms"),
-        "benchmark_std_time_ms": result.get("benchmark_std_time_ms"),
-        "benchmark_memory_peak_mb": result.get("benchmark_memory_peak_mb"),
-        "benchmark_successful_runs": result.get("benchmark_successful_runs"),
-        # PyTorch-specific metrics (torch.compile)
-        "torch_compile_benchmark_mean_time_ms": result.get("torch_compile_benchmark_mean_time_ms"),
-        "torch_compile_benchmark_std_time_ms": result.get("torch_compile_benchmark_std_time_ms"),
-        "torch_compile_speedup": result.get("torch_compile_speedup"),
-        # Success flag for easy filtering
+        # All server response fields
+        **result,
+        # Success flags for easy filtering
         "execution_success": result["status_code"] == 0,
         "has_benchmark_data": result.get("benchmark_mean_time_ms") is not None,
         "has_torch_compile_data": result.get("torch_compile_benchmark_mean_time_ms") is not None,
@@ -110,7 +114,8 @@ async def run_code(row):
 console.rule("[bold blue]Processing dataset[/bold blue]")
 
 if args.debug:
-    input_ds = input_ds.select(range(10))
+    debug_size = min(10, len(input_ds))
+    input_ds = input_ds.select(range(debug_size))
 
 async def process_ds():
     pds_list = await map(input_ds, run_code, num_proc=2 if args.debug else args.num_proc)
@@ -123,8 +128,6 @@ pds = asyncio.run(process_ds())
 output_name = output_dataset.replace("/", "_")
 if args.benchmark:
     output_name += "_benchmarked"
-if args.torch_compile:
-    output_name += "_compiled"
 
 pds.save_to_disk(output_name)
 
@@ -146,5 +149,6 @@ if args.benchmark:
     console.print(f"[cyan]Execution Statistics:[/cyan]")
     console.print(f"  Successful executions: {successful_executions}/{len(pds)} ({successful_executions/len(pds)*100:.1f}%)")
     console.print(f"  With benchmark data: {benchmark_data_count}/{len(pds)} ({benchmark_data_count/len(pds)*100:.1f}%)")
-    if args.torch_compile:
-        console.print(f"  With torch.compile data: {torch_compile_count}/{len(pds)} ({torch_compile_count/len(pds)*100:.1f}%)")
+    console.print(f"  With torch.compile data: {torch_compile_count}/{len(pds)} ({torch_compile_count/len(pds)*100:.1f}%)")
+
+    console.print(pds[0])

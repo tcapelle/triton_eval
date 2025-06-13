@@ -117,13 +117,6 @@ def test_triton_add():
     
     return results
 
-def benchmark_function():
-    '''Function for benchmarking'''
-    size = 1024 * 256  # 256K elements
-    x = torch.randn(size, device='cuda', dtype=torch.float32)
-    y = torch.randn(size, device='cuda', dtype=torch.float32)
-    return triton_add(x, y)
-
 # Run tests
 test_results = test_triton_add()
 print(f"Test results: {test_results}")
@@ -221,13 +214,7 @@ def test_add():
 
     return results
 
-def benchmark_function():
-    '''Function that will be called for benchmarking'''
-    input_tensor = torch.randn(256, 256, device='cuda')
-    other_tensor = torch.randn(256, 256, device='cuda')
-    return add(input_tensor, other_tensor, alpha=0.5)
-
-# Run tests
+# Run tests  
 test_results = test_add()
 print(f"Test results keys: {list(test_results.keys())}")
 for key, value in test_results.items():
@@ -245,7 +232,8 @@ for key, value in test_results.items():
                                        "tests": tests,
                                        "benchmark": True,
                                        "benchmark_runs": 5,
-                                       "torch_compile": False
+                                       "torch_compile": False,
+                                       "entrypoint": "add"
                                    },
                                    timeout=60.0)
             resp.raise_for_status()
@@ -277,63 +265,67 @@ for key, value in test_results.items():
             return False
 
 async def test_pytorch_torch_compile():
-    """Test PyTorch benchmarking with torch.compile"""
+    """Test PyTorch benchmarking with torch.compile using realistic dataset-like structure"""
     console.print("[bold blue]Testing PyTorch with torch.compile benchmarking[/bold blue]")
     
     code = """
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from typing import Optional
 
-class SimpleModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear1 = nn.Linear(512, 256)
-        self.linear2 = nn.Linear(256, 128)
-        self.linear3 = nn.Linear(128, 64)
+def add(input: torch.Tensor, other: torch.Tensor, alpha: float=1, out: Optional[torch.Tensor]=None):
+    \"\"\"
+    Adds the tensor or number 'other', scaled by 'alpha', to the 'input' tensor.
     
-    def forward(self, x):
-        x = F.relu(self.linear1(x))
-        x = F.relu(self.linear2(x))
-        return self.linear3(x)
-
-def create_model_and_data():
-    model = SimpleModel().cuda()
-    input_data = torch.randn(32, 512, device='cuda')
-    return model, input_data
+    Args:
+        input (Tensor): The input tensor.
+        other (Tensor or Number): The tensor or number to add to input.
+        alpha (Number, optional): The multiplier for 'other'. Default is 1.
+        out (Tensor, optional): The output tensor. If provided, the result will be stored in this tensor.
+        
+    Returns:
+        Tensor: The result of adding 'other' scaled by 'alpha' to 'input'.
+    \"\"\"
+    return torch.add(input, other, alpha=alpha, out=out)
 """
     
     tests = """
 import torch
 torch.manual_seed(42)
 
-# Create model and data
-model, input_data = create_model_and_data()
-
-def test_model():
+def test_add():
     results = {}
-    
-    # Test the model functionality
-    with torch.no_grad():
-        output = model(input_data)
-        results["output_shape"] = output.shape
-        results["output_range"] = [output.min().item(), output.max().item()]
-        results["model_parameters"] = sum(p.numel() for p in model.parameters())
-    
-    print(f"Model output shape: {output.shape}")
-    print(f"Output range: [{output.min().item():.3f}, {output.max().item():.3f}]")
-    print(f"Model has {sum(p.numel() for p in model.parameters())} parameters")
-    
+
+    # Test case 1: Adding two tensors with default alpha
+    input1 = torch.tensor([1.0, 2.0, 3.0], device='cuda')
+    other1 = torch.tensor([4.0, 5.0, 6.0], device='cuda')
+    results["test_case_1"] = add(input1, other1)
+
+    # Test case 2: Adding a tensor and a scalar with default alpha
+    input2 = torch.tensor([1.0, 2.0, 3.0], device='cuda')
+    other2 = 2.0
+    results["test_case_2"] = add(input2, other2)
+
+    # Test case 3: Adding two tensors with a specified alpha
+    input3 = torch.tensor([1.0, 2.0, 3.0], device='cuda')
+    other3 = torch.tensor([4.0, 5.0, 6.0], device='cuda')
+    results["test_case_3"] = add(input3, other3, alpha=0.5)
+
+    # Test case 4: Larger inputs for benchmarking
+    input4 = torch.randn(256, 256, device='cuda')
+    other4 = torch.randn(256, 256, device='cuda')
+    alpha = 0.5
+    results["test_case_4"] = add(input4, other4, alpha=alpha)
+
     return results
 
-def benchmark_function():
-    '''Function that will be called for benchmarking'''
-    with torch.no_grad():
-        return model(input_data)
-
 # Run tests
-test_results = test_model()
-print(f"Test results: {test_results}")
+test_results = test_add()
+print(f"Test results keys: {list(test_results.keys())}")
+for key, value in test_results.items():
+    if hasattr(value, 'shape'):
+        print(f"{key}: shape={value.shape}, dtype={value.dtype}")
+    else:
+        print(f"{key}: {value}")
 """
     
     async with httpx.AsyncClient() as client:
@@ -345,7 +337,8 @@ print(f"Test results: {test_results}")
                                        "benchmark": True,
                                        "benchmark_runs": 5,
                                        "torch_compile": True,
-                                       "torch_compile_mode": "default"
+                                       "torch_compile_mode": "default",
+                                       "entrypoint": "add"
                                    },
                                    timeout=120.0)  # Longer timeout for compilation
             resp.raise_for_status()
@@ -450,17 +443,6 @@ def test_add_functionality():
     
     return results
 
-def benchmark_function():
-    '''Function for benchmarking'''
-    input_tensor = torch.randn(1024, 512, device='cuda')
-    other_tensor = torch.randn(1024, 512, device='cuda')
-    alpha = 0.5
-    
-    if 'triton_add' in globals():
-        return triton_add(input_tensor, other_tensor, alpha=alpha)
-    else:
-        return add(input_tensor, other_tensor, alpha=alpha)
-
 # Run tests
 test_results = test_add_functionality()
 print(f"Test completed for {test_results['implementation']} implementation")
@@ -515,15 +497,15 @@ print(f"Test completed for {test_results['implementation']} implementation")
         table.add_column("Mean Time (ms)", style="yellow")
         table.add_column("Speedup", style="magenta")
         
-        triton_time = results["triton"].get('benchmark_mean_time_ms', 0)
-        pytorch_time = results["pytorch"].get('benchmark_mean_time_ms', 0)
+        triton_time = results["triton"].get('benchmark_mean_time_ms') or 0
+        pytorch_time = results["pytorch"].get('benchmark_mean_time_ms') or 0
         
         table.add_row("Triton", "✅ PASSED" if results["triton"]["status_code"] == 0 else "❌ FAILED", 
-                     f"{triton_time:.2f}" if triton_time else "N/A", "1.00x")
+                     f"{triton_time:.2f}" if triton_time and triton_time > 0 else "N/A", "1.00x")
         
-        speedup = pytorch_time / triton_time if triton_time > 0 and pytorch_time > 0 else 0
+        speedup = pytorch_time / triton_time if triton_time and triton_time > 0 and pytorch_time and pytorch_time > 0 else 0
         table.add_row("PyTorch", "✅ PASSED" if results["pytorch"]["status_code"] == 0 else "❌ FAILED",
-                     f"{pytorch_time:.2f}" if pytorch_time else "N/A", f"{speedup:.2f}x" if speedup > 0 else "N/A")
+                     f"{pytorch_time:.2f}" if pytorch_time and pytorch_time > 0 else "N/A", f"{speedup:.2f}x" if speedup > 0 else "N/A")
         
         console.print(table)
         

@@ -56,6 +56,7 @@ class PyTorchExecutionRequest(BaseModel):
     benchmark_runs: int = 10  # Number of benchmark runs
     torch_compile: bool = False  # Enable torch.compile benchmarking
     torch_compile_mode: str = "default"  # torch.compile mode: "default", "reduce-overhead", "max-autotune"
+    entrypoint: Optional[str] = None  # Function name to torch.compile (if not specified, will try to find benchmark_function)
 
 class CodeExecutionResponse(BaseModel):
     status_code: int
@@ -527,7 +528,8 @@ async def run_pytorch_endpoint(request: PyTorchExecutionRequest):
         "benchmark": request.benchmark,
         "benchmark_runs": request.benchmark_runs,
         "torch_compile": request.torch_compile,
-        "torch_compile_mode": request.torch_compile_mode
+        "torch_compile_mode": request.torch_compile_mode,
+        "entrypoint": request.entrypoint
     }
 
     loop = asyncio.get_event_loop()

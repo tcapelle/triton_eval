@@ -173,8 +173,12 @@ def _run_benchmark(temp_file_path, task_type, benchmark_runs):
         "successful_runs": successful_runs
     }
 
-def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile=False, torch_compile_mode="default"):
+def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile=False, torch_compile_mode="default", entrypoint=None, original_stderr_for_logging=None):
     """Run PyTorch-specific benchmarking by re-executing the entire module multiple times."""
+    
+    # Fallback to stderr if not provided
+    if original_stderr_for_logging is None:
+        original_stderr_for_logging = sys.stderr
     
     results = {}
     
@@ -292,14 +296,47 @@ def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_comp
             
             # Find functions that can be compiled
             compiled_functions = {}
-            for attr_name in dir(baseline_module):
-                if not attr_name.startswith('_'):
-                    attr = getattr(baseline_module, attr_name)
+            
+            # If entrypoint is specified, try to compile only that function
+            if entrypoint:
+                if hasattr(baseline_module, entrypoint):
+                    attr = getattr(baseline_module, entrypoint)
                     if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
                         try:
-                            compiled_functions[attr_name] = torch.compile(attr, mode=torch_compile_mode)
-                        except:
-                            pass  # Skip functions that can't be compiled
+                            compiled_functions[entrypoint] = torch.compile(attr, mode=torch_compile_mode)
+                            print(f"[Worker PID {os.getpid()}] Successfully compiled specified entrypoint: {entrypoint}", file=original_stderr_for_logging, flush=True)
+                        except Exception as e:
+                            print(f"[Worker PID {os.getpid()}] Failed to compile specified entrypoint '{entrypoint}': {e}", file=original_stderr_for_logging, flush=True)
+                    else:
+                        print(f"[Worker PID {os.getpid()}] Specified entrypoint '{entrypoint}' is not a compilable function", file=original_stderr_for_logging, flush=True)
+                else:
+                    print(f"[Worker PID {os.getpid()}] Specified entrypoint '{entrypoint}' not found in module", file=original_stderr_for_logging, flush=True)
+            
+            # If no entrypoint specified or entrypoint compilation failed, try common patterns and all functions
+            if not compiled_functions:
+                # First try common benchmark function names
+                common_names = ["benchmark_function", "main", "run", "forward"]
+                for func_name in common_names:
+                    if hasattr(baseline_module, func_name):
+                        attr = getattr(baseline_module, func_name)
+                        if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
+                            try:
+                                compiled_functions[func_name] = torch.compile(attr, mode=torch_compile_mode)
+                                print(f"[Worker PID {os.getpid()}] Successfully compiled common function: {func_name}", file=original_stderr_for_logging, flush=True)
+                                break  # Use the first successful common function
+                            except:
+                                pass  # Try next common name
+                
+                # If still no functions compiled, try all functions as fallback
+                if not compiled_functions:
+                    for attr_name in dir(baseline_module):
+                        if not attr_name.startswith('_'):
+                            attr = getattr(baseline_module, attr_name)
+                            if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
+                                try:
+                                    compiled_functions[attr_name] = torch.compile(attr, mode=torch_compile_mode)
+                                except:
+                                    pass  # Skip functions that can't be compiled
             
             if not compiled_functions:
                 # No functions could be compiled, skip torch.compile benchmarking
@@ -458,6 +495,7 @@ def worker_main(task_queue, result_queue, gpu_id):
             benchmark_runs = 10
             torch_compile = False
             torch_compile_mode = "default"
+            entrypoint = None
         else:
             task_id = task_data["task_id"]
             task_type = task_data.get("task_type", "triton")  # Default to triton
@@ -466,6 +504,7 @@ def worker_main(task_queue, result_queue, gpu_id):
             benchmark_runs = task_data.get("benchmark_runs", 10)
             torch_compile = task_data.get("torch_compile", False)
             torch_compile_mode = task_data.get("torch_compile_mode", "default")
+            entrypoint = task_data.get("entrypoint")
 
         # Prepare to capture stdout/stderr
         old_stdout, old_stderr = sys.stdout, sys.stderr
@@ -531,7 +570,7 @@ def worker_main(task_queue, result_queue, gpu_id):
                         print(f"[Worker PID {os.getpid()}] Triton task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms", file=original_stderr_for_logging, flush=True)
                     elif task_type == "pytorch":
                         # Use PyTorch-specific benchmarking with entire module execution and optional torch.compile
-                        benchmark_results = _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile, torch_compile_mode)
+                        benchmark_results = _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile, torch_compile_mode, entrypoint, original_stderr_for_logging)
                         benchmark_mean_time_ms = benchmark_results["mean_time_ms"]
                         benchmark_std_time_ms = benchmark_results["std_time_ms"] 
                         benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]
