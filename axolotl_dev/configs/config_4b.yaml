@@ -17,7 +17,7 @@ trl:
   loss_type: dr_grpo # default -> bnpo
   scale_rewards: false # default -> true, should be false for dr_grpo
   max_completion_length: 8192
-  num_generations: 12
+  num_generations: 16
   use_vllm: true
   vllm_server_host: 0.0.0.0
   vllm_server_port: 8000
@@ -63,13 +63,13 @@ wandb_name: grpo-qwen3-4b
 wandb_log_model: checkpoint
 
 gradient_accumulation_steps: 3
-micro_batch_size: 4  # should match num_generations / num_gpus
-num_epochs: 3
+micro_batch_size: 8  # should match num_generations / num_gpus
+num_epochs: 5
 
 optimizer: adamw_torch_fused
 lr_scheduler: constant_with_warmup
-learning_rate: 1.0e-4
-max_grad_norm: 1.0e-4
+learning_rate: 1.0e-6
+max_grad_norm: 1.0e-2
 weight_decay: 0.01
 
 bf16: true
