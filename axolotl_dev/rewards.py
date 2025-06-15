@@ -47,6 +47,7 @@ def wandb_attributes():
         wandb_metrics = {k: v for k, v in dict(run.summary).items() if not k.startswith("_")}
         return weave.attributes(wandb_metrics)
 
+@weave.op
 async def _run_code_on_server(code: str, tests: str, benchmark: bool = True, benchmark_runs: int = BENCHMARK_RUNS) -> dict:
     """Execute Triton `code` + `tests` on the remote worker pool with optional benchmarking.
 
