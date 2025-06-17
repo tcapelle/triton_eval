@@ -135,11 +135,9 @@ REWARD_MAGNITUDES = {
     "exp_penalty": 0.5,
     "language_bonus": 0.1,
     "language_penalty": 0.0,
-    # Performance-based rewards
-    "performance_speedup_base": 1.0,      # Base reward for performance improvements
-    "performance_slowdown_penalty": 0.0,  # No penalty for slower kernels
-    "memory_efficiency_base": 0.2,        # Base reward for memory efficiency vs PyTorch
-    "benchmark_failure_penalty": -0.1,    # Penalty when benchmarking fails
+    # Simplified Performance-based rewards
+    "memory_efficiency_bonus": 0.2,        # Fixed bonus for memory efficiency
+    "benchmark_failure_penalty": -0.1,     # Fixed penalty when benchmarking fails
 }
 
 try: # this is not working, we are not saving the reward magnitudes to wandb
@@ -255,106 +253,210 @@ def one_code_blob_reward(completions, **kwargs):
 
 
 @weave.op
-async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, entrypoint: str):
-    "Runs the code and returns the output"
-    assert isinstance(tests, str), f"tests is not a string: {tests}"
-    # run pt code
-    gpu_id = random.choice(AVAILABLE_GPUS)
-    env = {
-        "CUDA_VISIBLE_DEVICES": str(gpu_id),
+def compute_performance_rewards(triton_output: dict, pytorch_baseline_time_ms: float = None, 
+                               pytorch_baseline_memory_mb: float = None, correct: bool = True, runs: bool = True):
+    """Compute performance and memory rewards based on Triton vs PyTorch baselines.
+    
+    Simplified reward structure:
+    - Performance: +speedup_percentage (e.g., 1.2x faster = +0.2)
+    - Memory: +0.2 fixed bonus if more efficient
+    - Benchmark failure: -0.1 fixed penalty
+    
+    Args:
+        triton_output: Dict containing Triton execution and benchmark results
+        pytorch_baseline_time_ms: Pure PyTorch execution time in ms
+        pytorch_baseline_memory_mb: Pure PyTorch memory usage in MB
+        correct: Whether the code produced correct output
+        runs: Whether the code executed successfully
+        
+    Returns:
+        Dict with performance_reward, memory_reward, and reward_components
+    """
+    reward_breakdown = {
+        "performance_reward": 0.0,
+        "memory_reward": 0.0,
+        "reward_components": []
+    }
+    
+    # Only compute performance reward if code is correct and runs
+    if not (correct and runs and pytorch_baseline_time_ms is not None):
+        # Add debug information for why we're returning early
+        debug_reasons = []
+        if not correct:
+            debug_reasons.append("code_not_correct")
+        if not runs:
+            debug_reasons.append("code_not_runs")
+        if pytorch_baseline_time_ms is None:
+            debug_reasons.append("no_baseline_time")
+        
+        reward_breakdown["debug_early_return"] = True
+        reward_breakdown["debug_early_return_reasons"] = debug_reasons
+        reward_breakdown["reward_components"].append(f"Performance rewards skipped: {', '.join(debug_reasons)}")
+        return reward_breakdown
+    
+    # Extract benchmark metrics from Triton execution
+    triton_time_ms = triton_output.get("triton_benchmark_mean_time_ms")
+    triton_memory_mb = triton_output.get("triton_benchmark_memory_peak_mb")
+    triton_successful_runs = triton_output.get("triton_benchmark_successful_runs", 0)
+    
+    # Add debug info that we're computing performance rewards
+    reward_breakdown["debug_early_return"] = False
+    reward_breakdown["debug_performance_computed"] = True
+    
+    # Performance scoring (time-based) - Linear scaling
+    if (triton_time_ms is not None and 
+        triton_time_ms > 0 and 
+        pytorch_baseline_time_ms > 0 and
+        triton_successful_runs > 0):
+        
+        speedup = pytorch_baseline_time_ms / triton_time_ms
+        
+        if speedup > 1.0:
+            # Logarithmic reward: prevents excessive rewards for very high speedups
+            speedup_bonus = math.log(speedup)
+            reward_breakdown["performance_reward"] = speedup_bonus
+            reward_breakdown["reward_components"].append(
+                f"Performance speedup ({speedup:.2f}x): +{speedup_bonus:.3f}"
+            )
+        # No penalty for slowdowns (speedup < 1.0)
+        
+        # Add performance metrics to output for debugging
+        triton_output.update({
+            "speedup": speedup,
+            "is_faster": speedup > 1.0,
+            "triton_time_ms": triton_time_ms,
+            "pytorch_baseline_time_ms": pytorch_baseline_time_ms
+        })
+    else:
+        # Fixed penalty when benchmarking fails but code runs
+        reward_breakdown["performance_reward"] = REWARD_MAGNITUDES["benchmark_failure_penalty"]
+        reward_breakdown["reward_components"].append(
+            f"Benchmark failure: {reward_breakdown['performance_reward']}"
+        )
+    
+    # Memory efficiency reward - Fixed bonus
+    if (triton_memory_mb is not None and 
+        pytorch_baseline_memory_mb is not None and 
+        triton_memory_mb > 0 and 
+        pytorch_baseline_memory_mb > 0):
+        
+        memory_improvement_ratio = pytorch_baseline_memory_mb / triton_memory_mb
+        
+        if memory_improvement_ratio > 1.0:  # Triton uses less memory than PyTorch
+            reward_breakdown["memory_reward"] = REWARD_MAGNITUDES["memory_efficiency_bonus"]
+            reward_breakdown["reward_components"].append(
+                f"Memory efficiency ({memory_improvement_ratio:.2f}x): +{reward_breakdown['memory_reward']}"
+            )
+        
+        # Add memory metrics to output for debugging
+        triton_output.update({
+            "memory_improvement_ratio": memory_improvement_ratio,
+            "is_memory_efficient": memory_improvement_ratio > 1.0,
+            "triton_memory_mb": triton_memory_mb,
+            "pytorch_baseline_memory_mb": pytorch_baseline_memory_mb
+        })
+    
+    return reward_breakdown
+
+def _create_failure_result(reward: float, reason: str, runs: bool = False, correct: bool = False, is_valid: bool = False):
+    """Helper function to create standardized failure results."""
+    reward_breakdown = {
+        "base_reward": reward,
+        "performance_reward": 0.0,
+        "memory_reward": 0.0,
+        "total_reward": reward,
+        "reward_components": [f"{reason}: {reward}"]
+    }
+    
+    return {
+        "triton_runs": runs,
+        "correct": correct,
+        "is_valid": is_valid,
+        "reason": reason,
+        "final_reward": reward,
+        "reward_breakdown": reward_breakdown
     }
 
+@weave.op
+async def run_scorer_async(output: str, tests: str, pytorch_code_output: str, entrypoint: str, 
+                          pytorch_baseline_time_ms: float = None, pytorch_baseline_memory_mb: float = None):
+    """Runs the code, computes performance metrics, and calculates the final reward.
+    
+    Args:
+        output: Model output containing Triton code
+        tests: Test code to run
+        pytorch_code_output: Expected PyTorch stdout for correctness checking
+        entrypoint: Function name for the kernel
+        pytorch_baseline_time_ms: Pure PyTorch execution time in ms (for performance comparison)
+        pytorch_baseline_memory_mb: Pure PyTorch memory usage in MB (for performance comparison)
+    
+    Returns:
+        Dict containing execution results, performance metrics, and final reward with breakdown
+    """
+    assert isinstance(tests, str), f"tests is not a string: {tests}"
+    
     triton_code = extract_code(output)
-    # static hack & coverage analysis
+    
+    # Static analysis and validation
     analysis = is_valid_kernel(triton_code, entrypoint)
     if not analysis["is_valid"]:
-        # hacked kernels short-circuit
-        return {"triton_runs": False, "correct": False, "is_valid": False, "reason": analysis["reason"]}
+        return _create_failure_result(REWARD_MAGNITUDES["code_runs_fail"], "Code runs fail")
     
-    # too-short output => no kernel
+    # Check if code is too short
     if len(triton_code) < 10:
-        return {"triton_runs": False, "correct": False, "is_valid": False, "reason": "Triton code too short."}
-    
+        return _create_failure_result(REWARD_MAGNITUDES["code_runs_fail"], "Code too short")
 
+    # Execute the code on server
+    triton_output = await _run_code_on_server(triton_code, tests, benchmark=True, benchmark_runs=BENCHMARK_RUNS)
 
-    if RUN_ON_SERVER:
-        # Enable benchmarking for performance measurement
-        triton_output = await _run_code_on_server(triton_code, tests, benchmark=True, benchmark_runs=BENCHMARK_RUNS)
-    else:
-        # Fallback to local execution (kept for completeness)
-        triton_and_test = f'import torch\n{triton_code}\n\n{"#"*146}\n\n{tests}'
-        try:
-            triton_output = run_python_code(triton_and_test, env)
-        except subprocess.TimeoutExpired:
-            return {"triton_runs": False, "correct": False}
-
-    # check correctness
+    # Check execution results
     runs = triton_output["triton_status_code"] == 0
-
-    # simple stdout string match
     correct = pytorch_code_output == triton_output["triton_stdout"] and runs
 
+    # Compute base reward
+    if not runs:
+        base_reward = REWARD_MAGNITUDES["code_runs_fail"]
+        base_component = f"Code execution failed: {base_reward}"
+    elif not correct:
+        base_reward = REWARD_MAGNITUDES["code_runs_incorrect"]
+        base_component = f"Code incorrect output: {base_reward}"
+    else:
+        base_reward = REWARD_MAGNITUDES["code_runs_correct"]
+        base_component = f"Code correct: {base_reward}"
+
+    # Compute performance rewards
+    performance_results = compute_performance_rewards(
+        triton_output, pytorch_baseline_time_ms, pytorch_baseline_memory_mb, correct, runs
+    )
+    
+    # Build final reward breakdown
+    total_reward = base_reward + performance_results["performance_reward"] + performance_results["memory_reward"]
+    reward_components = [base_component] + performance_results["reward_components"]
+    
+    reward_breakdown = {
+        "base_reward": base_reward,
+        "performance_reward": performance_results["performance_reward"],
+        "memory_reward": performance_results["memory_reward"],
+        "total_reward": total_reward,
+        "reward_components": reward_components
+    }
+
+    # Prepare and return final result
     result = {
         "triton_runs": runs,
         "correct": correct,
-        "is_valid": True, # If we reached here, it means it wasn't initially flagged as hacked by static analysis
-        "reason": "" # No hack reason if not hacked
-        }
+        "is_valid": True,
+        "reason": "",
+        "final_reward": total_reward,
+        "reward_breakdown": reward_breakdown
+    }
     
-    # attach dynamic result and coverage
     triton_output.update(result)
     return triton_output
 
-def _compute_code_runs_reward(run_output, pytorch_baseline_time=None, pytorch_baseline_memory=None):
-    """Compute reward for code execution and optional performance.
-    
-    Args:
-        run_output: Dict with Triton execution results and benchmark data
-        pytorch_baseline_time: Pure PyTorch execution time in ms (not torch.compile)
-        pytorch_baseline_memory: Pure PyTorch memory usage in MB (not torch.compile)
-    """
-    triton_runs = run_output["triton_runs"]
-    correct = run_output["correct"]
-    
-    # Base correctness reward
-    if not triton_runs:
-        base_reward = REWARD_MAGNITUDES["code_runs_fail"]
-    elif not correct:
-        base_reward = REWARD_MAGNITUDES["code_runs_incorrect"]
-    else:
-        base_reward = REWARD_MAGNITUDES["code_runs_correct"]
-    
-    # Add performance reward if we have baseline data and code is correct
-    # NOTE: We compare against pure PyTorch performance, not torch.compile
-    performance_reward = 0.0
-    if correct and triton_runs and pytorch_baseline_time is not None:
-        with wandb_attributes():
-            perf_score = performance_scorer(run_output, pytorch_baseline_time, pytorch_baseline_memory)
-        
-        if perf_score["has_benchmark_data"]:
-            speedup = perf_score["speedup"]
-            
-            if speedup > 1.0:
-                # Reward speedups with logarithmic scaling
-                performance_reward = REWARD_MAGNITUDES["performance_speedup_base"] * math.log(speedup)
-            else:
-                # No penalty for slowdowns (neutral reward)
-                performance_reward = REWARD_MAGNITUDES["performance_slowdown_penalty"]
-            
-            # Memory efficiency reward - compare to PyTorch baseline
-            if perf_score.get("memory_improvement_ratio") is not None:
-                memory_ratio = perf_score["memory_improvement_ratio"]
-                if memory_ratio > 1.0:  # Triton uses less memory than PyTorch
-                    performance_reward += REWARD_MAGNITUDES["memory_efficiency_base"] * math.log(memory_ratio)
-        else:
-            # Penalize when benchmarking fails but code runs
-            performance_reward = REWARD_MAGNITUDES["benchmark_failure_penalty"]
-    
-    return base_reward + performance_reward
-
 @weave.op
 def reward_code_runs(completions, tests, stdout, entrypoint, benchmark_mean_time_ms=None, benchmark_memory_peak_mb=None, **kwargs):
-    """Synchronous wrapper around the async implementation with optional performance scoring.
+    """Synchronous wrapper around the async implementation with clearer reward computation.
     
     Args:
         completions: Model completions to evaluate
@@ -368,22 +470,24 @@ def reward_code_runs(completions, tests, stdout, entrypoint, benchmark_mean_time
     
     async def _compute_async():
         responses = [completion[0]['content'] for completion in completions]
-        # delegate to hack-gated dynamic run
-        tasks = [run_scorer_async(resp, test, pt_std, entrypt)
-                 for resp, test, pt_std, entrypt in zip(responses, tests, stdout, entrypoint)]
+        
+        # Create tasks for each completion
+        tasks = []
+        for i, (resp, test, pt_std, entrypt) in enumerate(zip(responses, tests, stdout, entrypoint)):
+            # Get baseline performance data for this specific example
+            baseline_time = benchmark_mean_time_ms[i] if benchmark_mean_time_ms else None
+            baseline_memory = benchmark_memory_peak_mb[i] if benchmark_memory_peak_mb else None
+            
+            tasks.append(run_scorer_async(resp, test, pt_std, entrypt, baseline_time, baseline_memory))
+        
         with wandb_attributes():
             run_scores = await asyncio.gather(*tasks)
         
-        # Compute rewards with optional performance baseline (using pure PyTorch as baseline)
-        if benchmark_mean_time_ms:
-            if benchmark_memory_peak_mb:
-                return [_compute_code_runs_reward(score, baseline_time, baseline_memory) 
-                       for score, baseline_time, baseline_memory in zip(run_scores, benchmark_mean_time_ms, benchmark_memory_peak_mb)]
-            else:
-                return [_compute_code_runs_reward(score, baseline_time) 
-                       for score, baseline_time in zip(run_scores, benchmark_mean_time_ms)]
-        else:
-            return [_compute_code_runs_reward(score) for score in run_scores]
+        # Extract final rewards (computation is now done in run_scorer_async)
+        rewards = [score["final_reward"] for score in run_scores]
+        
+        
+        return rewards
 
     try:
         loop = asyncio.get_running_loop()
@@ -601,64 +705,3 @@ def torch_zeros_reward(completions, **kwargs):
             score = torch_zeros_scorer(triton_code)
         rewards.append(REWARD_MAGNITUDES["torch_zeros_ok"] if score["uses_torch_zeros"] else 0)
     return rewards
-
-# ===== Performance-Based Rewards =====
-
-@weave.op
-def performance_scorer(triton_benchmark_result: dict, pytorch_baseline_time_ms: float, pytorch_baseline_memory_mb: float = None) -> dict:
-    """Score Triton kernel performance against pure PyTorch baseline (not torch.compile).
-    
-    Args:
-        triton_benchmark_result: Dict containing Triton execution and benchmark results (with triton_ prefix)
-        pytorch_baseline_time_ms: Pure PyTorch execution time in milliseconds (from dataset)
-        pytorch_baseline_memory_mb: Pure PyTorch memory usage in MB (from dataset, optional)
-        
-    Returns:
-        Dict with performance metrics including speedup, memory efficiency, etc.
-    """
-    
-    # Extract benchmark metrics from Triton execution (with triton_ prefix)
-    triton_time_ms = triton_benchmark_result.get("triton_benchmark_mean_time_ms")
-    triton_memory_mb = triton_benchmark_result.get("triton_benchmark_memory_peak_mb")
-    triton_successful_runs = triton_benchmark_result.get("triton_benchmark_successful_runs", 0)
-    
-    # Initialize result
-    result = {
-        "has_benchmark_data": False,
-        "speedup": 0.0,
-        "is_faster": False,
-        "memory_mb": triton_memory_mb,
-        "successful_runs": triton_successful_runs
-    }
-    
-    # Check if we have valid benchmark data
-    if (triton_time_ms is not None and 
-        pytorch_baseline_time_ms is not None and 
-        triton_time_ms > 0 and 
-        pytorch_baseline_time_ms > 0 and
-        triton_successful_runs > 0):
-        
-        speedup = pytorch_baseline_time_ms / triton_time_ms
-        result.update({
-            "has_benchmark_data": True,
-            "triton_time_ms": triton_time_ms,
-            "pytorch_time_ms": pytorch_baseline_time_ms,
-            "speedup": speedup,
-            "is_faster": speedup > 1.0,
-        })
-    
-    # Add memory comparison data if available
-    if (triton_memory_mb is not None and 
-        pytorch_baseline_memory_mb is not None and 
-        triton_memory_mb > 0 and 
-        pytorch_baseline_memory_mb > 0):
-        
-        memory_improvement_ratio = pytorch_baseline_memory_mb / triton_memory_mb
-        result.update({
-            "triton_memory_mb": triton_memory_mb,
-            "pytorch_memory_mb": pytorch_baseline_memory_mb,
-            "memory_improvement_ratio": memory_improvement_ratio,
-            "is_memory_efficient": memory_improvement_ratio > 1.0,
-        })
-    
-    return result
