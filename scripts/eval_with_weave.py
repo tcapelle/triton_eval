@@ -42,7 +42,7 @@ console = Console()
 # MODEL_NAME = "devstral"
 # MODEL_NAME = "qwen3-14b"
 # MODEL_NAME = "qwen3-14b-boot-instruct"
-MODEL_NAME = "qwencoder-14b"
+MODEL_NAME = "qwen3-32b-grpo"
 
 
 
@@ -164,8 +164,6 @@ class OpenAICompatibleModel(weave.Model):
         out = call_model(
             self.system_prompt.format(code_token=args.code_token, reasoning_token=args.reasoning_token), 
             self.user_prompt.format(pt_code=code, entrypoint=entrypoint, code_token=args.code_token, reasoning_token=args.reasoning_token), 
-            self.system_prompt.format(code_token=args.code_token, reasoning_token=args.reasoning_token), 
-            self.user_prompt.format(pt_code=code, entrypoint=entrypoint, code_token=args.code_token, reasoning_token=args.reasoning_token), 
             self.model_name, 
             temperature=self.temperature, 
             max_tokens=self.max_tokens)
@@ -232,8 +230,6 @@ weave_model = OpenAICompatibleModel(
     model_name=args.model_name,
     temperature=args.temperature,
     max_tokens=args.max_tokens,
-    system_prompt=eval_system_prompt,
-    user_prompt=eval_user_prompt,
     system_prompt=eval_system_prompt,
     user_prompt=eval_user_prompt,
 )
