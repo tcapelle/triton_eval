@@ -21,7 +21,7 @@ import weave
 from accelerate import Accelerator
 
 
-from triton_rewards_modular import TritonEnvWithExecution
+from triton_rewards_modular import get_triton_env
 
 accelerator = Accelerator()
 
@@ -52,7 +52,7 @@ def map_to_info(row):
 
 train_dataset = train_dataset.map(map_to_info)
 
-triton_env = TritonEnvWithExecution(dataset=train_dataset, use_api_scoring=True)
+triton_env = get_triton_env(dataset=train_dataset)
 
 # Training configuration
 training_args=grpo_defaults(run_name="qwen-4b")

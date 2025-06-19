@@ -227,17 +227,16 @@ def create_static_rubric(parser: XMLParser) -> Rubric:
         ],
         parser=parser
     )
-
 @weave.op
-async def call_triton_server(code, tests, client) -> Dict[str, Any]:
-    resp = await client.post(RUN_TRITON_ENDPOINT,
-                                json={
-                                    "code": code, 
-                                    "tests": tests,
-                                    "benchmark": True,
-                                    "benchmark_runs": BENCHMARK_RUNS
-                                },
-                                timeout=300.0)
+def call_triton_server(code, tests, client) -> Dict[str, Any]:
+    resp = client.post(RUN_TRITON_ENDPOINT,
+                      json={
+                          "code": code, 
+                          "tests": tests,
+                          "benchmark": True,
+                          "benchmark_runs": BENCHMARK_RUNS
+                      },
+                      timeout=300.0)
     resp.raise_for_status()
     data = resp.json()
     
@@ -251,16 +250,12 @@ async def call_triton_server(code, tests, client) -> Dict[str, Any]:
 class TritonAPIRubric(Rubric):
     """Rubric that makes async calls to Triton server for execution scoring."""
     
-    def __init__(self, parser: XMLParser):
-        # Only has the expensive async reward
-        super().__init__(
-            funcs=[],  # No static functions here
-            weights=[],
-            parser=parser
-        )
-    
+    def __init__(self, parser: XMLParser, **kwargs):
+        super().__init__(parser=parser, **kwargs)
+        self.add_reward_func(self.triton_execution_reward)
+
     @weave.op
-    async def triton_execution_reward(self, completion, answer=None, info=None, **kwargs) -> float:
+    def triton_execution_reward(self, completion, answer=None, info=None, **kwargs) -> float:
         """Async reward function for code execution and performance."""
         # Handle both string and list of messages format
         if isinstance(completion, list):
@@ -290,10 +285,10 @@ class TritonAPIRubric(Rubric):
             if not analysis.get("is_valid", False):
                 return -0.2
         
-        # Execute code on server asynchronously
-        async with httpx.AsyncClient() as client:
+        # Execute code on server synchronously
+        with httpx.Client() as client:
             try:
-                result = await call_triton_server(code, tests, client)
+                result = call_triton_server(code, tests, client)
             except Exception:
                 # Server error
                 return -0.2
@@ -346,37 +341,10 @@ class TritonAPIRubric(Rubric):
                     memory_reward = 0.2
         
         return base_reward + performance_reward + memory_reward
-    
-    async def score_rollout(self, prompt, completion, answer, state, task="default", info={}, **kwargs):
-        """Score a single rollout with async execution."""
-        triton_score = await self.triton_execution_reward(completion, answer=answer, info=info, **kwargs)
-        return {
-            'triton_execution_reward': triton_score,
-            'reward': triton_score
-        }
 
-
-# Simple Triton environment following wiki_search.py pattern
-class TritonEnvWithExecution(SingleTurnEnv):
-    """Triton environment that combines static and execution scoring using RubricGroup."""
-    
-    def __init__(self, dataset, eval_dataset=None, system_prompt=None, message_type='chat', use_api_scoring=False):
-        parser = XMLParser(['think', 'triton'], answer_field='triton')
-        
-        # Create static rubric (fast rewards for training)
-        static_rubric = create_static_rubric(parser)
-        
-        # Initialize base environment with static rubric
-        super().__init__(
-            dataset=dataset,
-            eval_dataset=eval_dataset,
-            system_prompt=system_prompt,
-            parser=parser,
-            rubric=static_rubric,
-            message_type=message_type
-        )
-        
-        # Optionally add API scoring using RubricGroup (like wiki_search.py does with JudgeRubric)
-        if use_api_scoring:
-            api_rubric = TritonAPIRubric(parser)
-            self.rubric = RubricGroup(rubrics=[api_rubric, static_rubric])
+def get_triton_env(dataset) -> SingleTurnEnv:
+    parser = XMLParser(['think', 'triton'], answer_field='triton')
+    static_rubric = create_static_rubric(parser)
+    api_rubric = TritonAPIRubric(parser)
+    group = RubricGroup(rubrics=[api_rubric, static_rubric])
+    return SingleTurnEnv(dataset=dataset, rubric=group)
