@@ -36,6 +36,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 train_dataset = load_dataset("tcapelle/boostrap_oai_pt_think", split="train")
 train_dataset = train_dataset.map(lambda row: {"prompt": row["prompt"][:-1]}) # drop last assistant message
+train_dataset = train_dataset.map(lambda row: {"answer": row.get("triton_code", "")})
 
 # Map dataset columns into info key for triton_execution_reward
 def map_to_info(row):
