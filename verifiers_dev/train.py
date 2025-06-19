@@ -20,13 +20,13 @@ import weave
 
 from accelerate import Accelerator
 
-
 from triton_rewards_modular import get_triton_env
 
 accelerator = Accelerator()
 
-wandb.init(entity="grpo-cuda", project="verifiers")
-weave.init("grpo-cuda/verifiers")
+if accelerator.is_main_process:
+    wandb.init(entity="grpo-cuda", project="verifiers")
+    weave.init("grpo-cuda/verifiers")
 
 # Load model and tokenizer
 
@@ -35,9 +35,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 
 train_dataset = load_dataset("tcapelle/boostrap_oai_pt_think", split="train")
-train_dataset = train_dataset.map(lambda row: {"prompt": row["prompt"][:-1]})
-# Add "answer" column for verifier training - use triton_code as the target answer
-train_dataset = train_dataset.map(lambda row: {"answer": row.get("triton_code", "")})
+train_dataset = train_dataset.map(lambda row: {"prompt": row["prompt"][:-1]}) # drop last assistant message
 
 # Map dataset columns into info key for triton_execution_reward
 def map_to_info(row):
@@ -55,16 +53,17 @@ train_dataset = train_dataset.map(map_to_info)
 triton_env = get_triton_env(dataset=train_dataset)
 
 # Training configuration
-training_args=grpo_defaults(run_name="qwen-4b")
-training_args.per_device_train_batch_size = 4
-training_args.gradient_accumulation_steps = 2
-training_args.num_generations = 8
-training_args.num_train_epochs = 1
-training_args.max_prompt_length = 12000  # Remove length limit
-training_args.max_completion_length = 12000
-training_args.beta = 0.0
-training_args.temperature = 0.6
-
+training_args=grpo_defaults(
+    run_name="qwen-4b",
+    per_device_train_batch_size = 4,
+    gradient_accumulation_steps = 2,
+    num_generations = 8,
+    num_train_epochs = 1,
+    max_prompt_length = 12000,  # Remove length limit
+    max_completion_length = 12000,
+    beta = 0.0,
+    temperature = 0.6,
+)
 # Create trainer
 trainer = GRPOTrainer(
     model=model,
