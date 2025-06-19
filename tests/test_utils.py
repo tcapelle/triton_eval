@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from datasets import Dataset
-from triton_eval.utils import map
+from triton_eval.utils import map, compare_outputs
 
 
 class TestMapFunction:
@@ -347,6 +347,248 @@ class TestMapFunction:
         
         # Check that it's an async function
         assert asyncio.iscoroutinefunction(map)
+
+
+class TestCompareOutputs:
+    """Test suite for the compare_outputs function."""
+
+    def test_identical_outputs_pass(self, capsys):
+        """Test that identical tensor outputs pass comparison."""
+        expected_str = """{'test_case_1': tensor([1., 2., 3.], device='cuda:0'), 'test_case_2': tensor([4, 5, 6], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1., 2., 3.], device='cuda:0'), 'test_case_2': tensor([4, 5, 6], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is True
+        assert len(result["results"]) == 2
+        
+        # Check that all test cases passed
+        statuses = [r[1] for r in result["results"]]
+        assert all(status == 'PASS' for status in statuses)
+        
+        # Check printed output
+        captured = capsys.readouterr()
+        assert "test_case_1: PASS" in captured.out
+        assert "test_case_2: PASS" in captured.out
+
+    def test_floating_point_tolerance(self, capsys):
+        """Test floating point comparison with tolerance."""
+        expected_str = """{'test_case_1': tensor([1.0000, 2.0000], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1.0000001, 1.9999999], device='cuda:0')}"""
+        
+        # Should pass with default tolerance
+        result = compare_outputs(expected_str, actual_str)
+        assert result["match"] is True
+        
+        # Should fail with very strict tolerance
+        result = compare_outputs(expected_str, actual_str, rtol=1e-10, atol=1e-10)
+        assert result["match"] is False
+        assert result["results"][0][1] == 'FAIL'
+
+    def test_shape_mismatch(self, capsys):
+        """Test that shape mismatches are detected."""
+        expected_str = """{'test_case_1': tensor([1., 2.], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1., 2., 3.], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        assert result["results"][0][1] == 'SHAPE_MISMATCH'
+        assert "(2,) vs (3,)" in result["results"][0][2]
+        
+        captured = capsys.readouterr()
+        assert "test_case_1: SHAPE_MISMATCH" in captured.out
+
+    def test_missing_test_case_in_actual(self, capsys):
+        """Test detection of missing test cases in actual output."""
+        expected_str = """{'test_case_1': tensor([1., 2.], device='cuda:0'), 'test_case_2': tensor([3., 4.], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1., 2.], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        
+        # Find the missing case result
+        missing_result = None
+        for name, status, msg, err in result["results"]:
+            if name == 'test_case_2':
+                missing_result = (name, status, msg, err)
+                break
+        
+        assert missing_result is not None
+        assert missing_result[1] == 'MISSING_IN_ACTUAL'
+        
+        captured = capsys.readouterr()
+        assert "test_case_2: MISSING_IN_ACTUAL" in captured.out
+
+    def test_unexpected_test_case_in_actual(self, capsys):
+        """Test detection of unexpected test cases in actual output."""
+        expected_str = """{'test_case_1': tensor([1., 2.], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1., 2.], device='cuda:0'), 'test_case_2': tensor([3., 4.], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        
+        # Find the unexpected case result
+        unexpected_result = None
+        for name, status, msg, err in result["results"]:
+            if name == 'test_case_2':
+                unexpected_result = (name, status, msg, err)
+                break
+        
+        assert unexpected_result is not None
+        assert unexpected_result[1] == 'UNEXPECTED_IN_ACTUAL'
+        
+        captured = capsys.readouterr()
+        assert "test_case_2: UNEXPECTED_IN_ACTUAL" in captured.out
+
+    def test_integer_comparison(self, capsys):
+        """Test exact comparison for integer tensors."""
+        expected_str = """{'test_case_1': tensor([1, 2, 3], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1, 2, 4], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        assert result["results"][0][1] == 'FAIL'
+        assert result["results"][0][2] == 'values_differ'
+        
+        captured = capsys.readouterr()
+        assert "test_case_1: FAIL (values_differ)" in captured.out
+
+    def test_mixed_data_types(self, capsys):
+        """Test comparison with mixed floating point and integer tensors."""
+        expected_str = """{'float_test': tensor([1.5, 2.5], device='cuda:0'), 'int_test': tensor([1, 2], device='cuda:0')}"""
+        actual_str = """{'float_test': tensor([1.5, 2.5], device='cuda:0'), 'int_test': tensor([1, 2], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is True
+        assert len(result["results"]) == 2
+        
+        # Both should pass
+        statuses = [r[1] for r in result["results"]]
+        assert all(status == 'PASS' for status in statuses)
+
+    def test_complex_tensor_format(self, capsys):
+        """Test with complex multi-line tensor format like in the user's example."""
+        expected_str = """{'test_case_4': tensor([2.1614, 2.3551, 1.0104, 2.2787, 1.1415, 1.3815, 2.4606, 2.1596, 1.2988,
+        2.5350, 1.9523, 2.0083, 1.4691, 2.3788, 2.5429, 1.7166, 2.4421, 3.0356,
+        1.6107, 1.8944, 1.9710, 2.4425, 2.1108, 1.5378, 3.0331, 1.2209, 2.4659,
+        2.7442, 2.2449, 1.4087], device='cuda:0')}"""
+        
+        actual_str = """{'test_case_4': tensor([2.1614, 2.3551, 1.0104, 2.2787, 1.1415, 1.3815, 2.4606, 2.1596, 1.2988,
+        2.5350, 1.9523, 2.0083, 1.4691, 2.3788, 2.5429, 1.7166, 2.4421, 3.0356,
+        1.6107, 1.8944, 1.9710, 2.4425, 2.1108, 1.5378, 3.0331, 1.2209, 2.4659,
+        2.7442, 2.2449, 1.4087], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is True
+        assert result["results"][0][1] == 'PASS'
+
+    def test_tensor_with_dtype_annotation(self, capsys):
+        """Test tensors with basic format."""
+        expected_str = """{'test_case_1': tensor([1, 2], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1, 2], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is True
+        assert result["results"][0][1] == 'PASS'
+
+    def test_realistic_mismatch_scenario(self, capsys):
+        """Test a realistic scenario similar to user's example with mismatches."""
+        expected_str = """{'test_case_1': tensor([3., 5.], device='cuda:0'), 'test_case_2': tensor([7., 9.], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([3., 3.], device='cuda:0'), 'test_case_2': tensor([7., 7., 7.], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        
+        # Check results
+        results_dict = {name: (status, msg) for name, status, msg, _ in result["results"]}
+        
+        # test_case_1 should fail due to value mismatch
+        assert results_dict['test_case_1'][0] == 'FAIL'
+        
+        # test_case_2 should fail due to shape mismatch
+        assert results_dict['test_case_2'][0] == 'SHAPE_MISMATCH'
+        assert "(2,) vs (3,)" in results_dict['test_case_2'][1]
+
+    def test_parse_error_handling(self, capsys):
+        """Test handling of parse errors in tensor strings."""
+        expected_str = """{'test_case_1': tensor([1., 2.], device='cuda:0')}"""
+        # Malformed tensor string
+        actual_str = """{'test_case_1': tensor([1., 2., device='cuda:0')}"""  # Missing closing bracket
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        assert result["results"][0][1] == 'PARSE_ERROR'
+        
+        captured = capsys.readouterr()
+        assert "test_case_1: PARSE_ERROR" in captured.out
+
+    def test_empty_strings(self):
+        """Test behavior with empty input strings."""
+        result = compare_outputs("", "")
+        
+        assert result["match"] is True
+        assert result["results"] == []
+
+    def test_custom_tolerance_values(self, capsys):
+        """Test custom rtol and atol values."""
+        expected_str = """{'test_case_1': tensor([1.0, 2.0], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1.01, 2.01], device='cuda:0')}"""
+        
+        # Should fail with strict tolerance
+        result = compare_outputs(expected_str, actual_str, rtol=1e-3, atol=1e-3)
+        assert result["match"] is False
+        
+        # Should pass with loose tolerance
+        result = compare_outputs(expected_str, actual_str, rtol=1e-1, atol=1e-1)
+        assert result["match"] is True
+
+    def test_max_error_reporting(self, capsys):
+        """Test that max error is correctly reported for floating point comparisons."""
+        expected_str = """{'test_case_1': tensor([1.0, 2.0], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([1.1, 2.05], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str, rtol=1e-10, atol=1e-10)
+        
+        assert result["match"] is False
+        
+        # Check that max_error is reported
+        max_error = result["results"][0][3]
+        assert max_error is not None
+        assert max_error > 0.05  # Should be around 0.1 (max difference)
+        
+        # Check that it's in the message
+        assert "max_error=" in result["results"][0][2]
+
+    def test_user_example_format(self, capsys):
+        """Test with the actual format from user's example."""
+        expected_str = """{'test_case_1': tensor([3., 5.], device='cuda:0'), 'test_case_2': tensor([7., 9.], device='cuda:0'), 'test_case_3': tensor([5., 2.], device='cuda:0')}"""
+        actual_str = """{'test_case_1': tensor([3., 3.], device='cuda:0'), 'test_case_2': tensor([7., 7., 7.], device='cuda:0'), 'test_case_3': tensor([5., 5.], device='cuda:0')}"""
+        
+        result = compare_outputs(expected_str, actual_str)
+        
+        assert result["match"] is False
+        assert len(result["results"]) == 3
+        
+        # Check specific results
+        results_dict = {name: (status, msg) for name, status, msg, _ in result["results"]}
+        
+        # test_case_1: value mismatch (3.,5.) vs (3.,3.)
+        assert results_dict['test_case_1'][0] == 'FAIL'
+        
+        # test_case_2: shape mismatch (2,) vs (3,)
+        assert results_dict['test_case_2'][0] == 'SHAPE_MISMATCH'
+        
+        # test_case_3: value mismatch (5.,2.) vs (5.,5.)
+        assert results_dict['test_case_3'][0] == 'FAIL'
 
 
 # Additional integration-style tests

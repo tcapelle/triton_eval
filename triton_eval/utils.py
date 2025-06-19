@@ -56,11 +56,12 @@ def compare_outputs(expected_str, actual_str, rtol=1e-05, atol=1e-08):
     - Checks shape equality
     - Uses allclose for floats (with given tolerances)
     - Uses array_equal for ints
-    Prints a per-test summary and returns a list of (name, status, message).
+    Prints a per-test summary and returns a dict with match status and detailed results.
     """
     # Regex to pull 'key': tensor([...]) entries
+    # Updated to handle dictionary format with commas, spaces, and closing braces
     entry_re = re.compile(
-        r"'(?P<name>[^']+)'\s*:\s*(?P<tensor>tensor\([\s\S]*?\))(?:,|$)"
+        r"'(?P<name>[^']+)'\s*:\s*(?P<tensor>tensor\([\s\S]*?\))(?:,\s*|$|\s*})"
     )
     expected = {m.group('name'): m.group('tensor') for m in entry_re.finditer(expected_str)}
     actual   = {m.group('name'): m.group('tensor') for m in entry_re.finditer(actual_str)}
@@ -106,4 +107,10 @@ def compare_outputs(expected_str, actual_str, rtol=1e-05, atol=1e-08):
     for name, status, msg, _ in results:
         print(f"{name}: {status} ({msg})")
     
-    return results
+    # Check if all tests passed
+    all_passed = all(status == 'PASS' for _, status, _, _ in results)
+    
+    return {
+        "match": all_passed,
+        "results": results
+    }
