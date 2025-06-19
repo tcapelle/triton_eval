@@ -103,10 +103,6 @@ def compare_outputs(expected_str, actual_str, rtol=1e-05, atol=1e-08):
         if name not in expected:
             results.append((name, 'UNEXPECTED_IN_ACTUAL', '', None))
     
-    # Print summary
-    for name, status, msg, _ in results:
-        print(f"{name}: {status} ({msg})")
-    
     # Check if all tests passed
     all_passed = all(status == 'PASS' for _, status, _, _ in results)
     
