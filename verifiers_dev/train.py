@@ -1,10 +1,4 @@
-# CUDA_VISIBLE_DEVICES=0,1 vf-vllm --model 'Qwen/Qwen3-4B' --tensor-parallel-size 2
-
 import os
-# Set environment variables to help with NCCL issues
-os.environ["NCCL_DEBUG"] = "INFO"
-os.environ["NCCL_TIMEOUT"] = "3600"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -63,6 +57,7 @@ training_args.max_prompt_length = 12000  # Remove length limit
 training_args.max_completion_length = 12000
 training_args.beta = 0.0
 training_args.temperature = 0.6
+training_args.async_generation_timeout = 400.0
 
 # Create trainer
 trainer = GRPOTrainer(
