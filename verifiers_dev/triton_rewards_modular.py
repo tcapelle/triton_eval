@@ -16,9 +16,8 @@ from triton_eval.kernel_checks import is_valid_kernel
 
 
 # Server configuration
-# SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
-SERVER_URL = "http://127.0.0.1:9347"
-RUN_TRITON_ENDPOINT = f"{SERVER_URL}/run_triton"
+SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
+RUN_TRITON_ENDPOINT = f"/run_triton"
 BENCHMARK_RUNS = 10
 
 # Valid triton.language methods
@@ -228,8 +227,9 @@ def create_static_rubric(parser: XMLParser) -> Rubric:
         parser=parser
     )
 @weave.op
-def call_triton_server(code, tests, client) -> Dict[str, Any]:
-    resp = client.post(RUN_TRITON_ENDPOINT,
+def call_triton_server(code, tests, client, url=SERVER_URL) -> Dict[str, Any]:
+    triton_endpoint = f"{url}{RUN_TRITON_ENDPOINT}"
+    resp = client.post(triton_endpoint,
                       json={
                           "code": code, 
                           "tests": tests,
@@ -250,9 +250,10 @@ def call_triton_server(code, tests, client) -> Dict[str, Any]:
 class TritonAPIRubric(Rubric):
     """Rubric that makes async calls to Triton server for execution scoring."""
     
-    def __init__(self, parser: XMLParser, **kwargs):
+    def __init__(self, parser: XMLParser, triton_server_url: str, **kwargs):
         super().__init__(parser=parser, **kwargs)
         self.add_reward_func(self.triton_execution_reward)
+        self.triton_server_url = triton_server_url
 
     @weave.op
     def triton_execution_reward(self, completion, answer=None, info=None, **kwargs) -> float:
@@ -288,7 +289,7 @@ class TritonAPIRubric(Rubric):
         # Execute code on server synchronously
         with httpx.Client() as client:
             try:
-                result = call_triton_server(code, tests, client)
+                result = call_triton_server(code, tests, client, self.triton_server_url)
             except Exception:
                 # Server error
                 return -0.2
@@ -342,9 +343,9 @@ class TritonAPIRubric(Rubric):
         
         return base_reward + performance_reward + memory_reward
 
-def get_triton_env(dataset) -> SingleTurnEnv:
+def get_triton_env(dataset, triton_server_url: str = RUN_TRITON_ENDPOINT) -> SingleTurnEnv:
     parser = XMLParser(['think', 'triton'], answer_field='triton')
     static_rubric = create_static_rubric(parser)
-    api_rubric = TritonAPIRubric(parser)
+    api_rubric = TritonAPIRubric(parser, triton_server_url)
     group = RubricGroup(rubrics=[api_rubric, static_rubric])
     return SingleTurnEnv(dataset=dataset, rubric=group)

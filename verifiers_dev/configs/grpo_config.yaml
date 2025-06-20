@@ -1,0 +1,34 @@
+# GRPO Training Configuration
+seed: 42
+
+model_name_or_path: "Qwen/Qwen3-4B"
+dataset_name: "tcapelle/boostrap_oai_pt_think"
+
+wandb_entity: "grpo-cuda"
+wandb_project: "verifiers"
+
+run_name: "qwen-4b"
+output_dir: "/model-checkpoints/"
+
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 2
+num_generations: 8
+num_train_epochs: 1
+max_prompt_length: 12000  # Remove length limit
+max_completion_length: 12000
+beta: 0.0
+temperature: 0.6
+async_generation_timeout: 400.0
+bf16: True
+
+learning_rate: 1e-6
+lr_scheduler_type: "constant_with_warmup"
+warmup_steps: 10
+
+save_strategy: "steps"
+save_steps: 500
+save_only_model: True
+
+logging_steps: 1
+saves_per_epoch: 1
+save_total_limit: 2
