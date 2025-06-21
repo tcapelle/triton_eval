@@ -17,14 +17,15 @@ import torch.distributed as dist
 from config import GRPOScriptArgs
 from triton_rewards_modular import get_triton_env
 
-is_main_process = dist.is_initialized() and dist.get_rank() == 0
+def is_main_process():
+    return dist.is_initialized() and dist.get_rank() == 0
 
 def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: ModelConfig):
     set_seed(training_args.seed)
 
     training_args.output_dir = f"{training_args.output_dir}/{script_args.wandb_name}"
 
-    if is_main_process:
+    if is_main_process():
         print(f"Script parameters:\n{script_args}\n--------------------------------")
         print(f"Training parameters:\n{training_args}\n--------------------------------")
         print(f"Model parameters:\n{model_args}\n--------------------------------")
