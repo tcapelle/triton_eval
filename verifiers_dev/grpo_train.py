@@ -12,7 +12,7 @@ from trl import ModelConfig, TrlParser
 import wandb
 import weave
 
-from accelerate import Accelerator
+import torch.distributed as dist
 
 from config import GRPOScriptArgs
 from triton_rewards_modular import get_triton_env
@@ -25,11 +25,9 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
     print(f"Training parameters:\n{training_args}\n--------------------------------")
     print(f"Model parameters:\n{model_args}\n--------------------------------")
 
-    accelerator = Accelerator()
-
     training_args.output_dir = f"{training_args.output_dir}/{script_args.wandb_name}"
 
-    if accelerator.is_main_process:
+    if dist.is_initialized() and dist.get_rank() == 0:
         wandb.init(entity=script_args.wandb_entity, project=script_args.wandb_project, name=script_args.wandb_name)
         weave.init(f"{script_args.wandb_entity}/{script_args.wandb_project}")
 
