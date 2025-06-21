@@ -17,17 +17,18 @@ import torch.distributed as dist
 from config import GRPOScriptArgs
 from triton_rewards_modular import get_triton_env
 
+is_main_process = dist.is_initialized() and dist.get_rank() == 0
 
 def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: ModelConfig):
     set_seed(training_args.seed)
 
-    print(f"Script parameters:\n{script_args}\n--------------------------------")
-    print(f"Training parameters:\n{training_args}\n--------------------------------")
-    print(f"Model parameters:\n{model_args}\n--------------------------------")
-
     training_args.output_dir = f"{training_args.output_dir}/{script_args.wandb_name}"
 
-    if dist.is_initialized() and dist.get_rank() == 0:
+    if is_main_process:
+        print(f"Script parameters:\n{script_args}\n--------------------------------")
+        print(f"Training parameters:\n{training_args}\n--------------------------------")
+        print(f"Model parameters:\n{model_args}\n--------------------------------")
+
         wandb.init(entity=script_args.wandb_entity, project=script_args.wandb_project, name=script_args.wandb_name)
         weave.init(f"{script_args.wandb_entity}/{script_args.wandb_project}")
 
@@ -59,9 +60,10 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
         return {"info": info}
 
     train_dataset = train_dataset.map(map_to_info)
-
-    print(f"Loading Triton environment with server url {script_args.triton_server_url}")
     triton_env = get_triton_env(dataset=train_dataset, triton_server_url=script_args.triton_server_url)
+
+    if is_main_process:
+        print(f"Loading Triton environment with server url {script_args.triton_server_url}")
 
     # Create trainer
     trainer = GRPOTrainer(
@@ -76,9 +78,9 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
     trainer.train()
 
     # Save final model
-    print(f"Model saved to {training_args.output_dir}")
     trainer.save_model(training_args.output_dir)
     if trainer.accelerator.is_main_process:
+        print(f"Model saved to {training_args.output_dir}")
         # Restore k,v cache for fast inference
         trainer.model.config.use_cache = True
         trainer.model.config.save_pretrained(training_args.output_dir)
