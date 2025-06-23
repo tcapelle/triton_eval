@@ -290,8 +290,9 @@ class TritonAPIRubric(Rubric):
         with httpx.Client() as client:
             try:
                 result = call_triton_server(code, tests, client, self.triton_server_url)
-            except Exception:
-                # Server error
+            except Exception as e:
+                # Server error raise warning
+                print(f">> Triton Triton Server error, failed computing rewards at {self.triton_server_url}: \n{e}")
                 return -0.2
         
         # Check execution results
