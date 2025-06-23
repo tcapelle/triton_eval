@@ -275,7 +275,7 @@ class TritonAPIRubric(Rubric):
         
         # Access values directly from info (mapped in train.py)
         tests = info.get("tests", "")
-        expected_stdout = info.get("stdout", "")
+        expected_stdout = info.get("pt_stdout", "")
         entrypoint = info.get("entrypoint", "")
         pytorch_baseline_time_ms = info.get("benchmark_mean_time_ms")
         pytorch_baseline_memory_mb = info.get("benchmark_memory_peak_mb")

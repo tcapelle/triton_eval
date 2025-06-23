@@ -53,7 +53,7 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
     def map_to_info(row):
         info = {
             "tests": row.get("tests", ""),
-            "stdout": row.get("stdout", ""),
+            "pt_stdout": row.get("pt_stdout", ""),
             "entrypoint": row.get("entrypoint", ""),
             "benchmark_mean_time_ms": row.get("benchmark_mean_time_ms"),
             "benchmark_memory_peak_mb": row.get("benchmark_memory_peak_mb")
