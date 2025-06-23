@@ -28,7 +28,7 @@ except ImportError:
     console.print("[server] [yellow]Warning:[/yellow] torch not installed, defaulting to 1 GPU.")
     NUM_GPUS = 1
 
-CONCURRENCY_PER_GPU = 1
+CONCURRENCY_PER_GPU = int(os.getenv("CONCURRENCY_PER_GPU", 1))
 WORKER_COUNT = NUM_GPUS * CONCURRENCY_PER_GPU
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", 30)) # Timeout for each task execution in seconds (e.g., 2 minutes)
 WORKER_JOIN_TIMEOUT = int(os.getenv("WORKER_JOIN_TIMEOUT", 20)) # Seconds to wait for worker processes to join gracefully
