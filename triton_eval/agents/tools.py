@@ -94,6 +94,8 @@ def run_python_file(file_path: str, env: dict[str, str] = None, timeout: int = 6
         ["python", file_path],
         capture_output=True,
         text=True,
+        encoding='utf-8',
+        errors='replace',
         env=current_env,
         timeout=timeout
     )
@@ -111,7 +113,7 @@ def save_to_file(file_path: str, content: str):
         file_path: The path of the file to write to.
         content: The string content to write to the file.
     """
-    with open(file_path, "w") as f:
+    with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
 
 def read_file(file_path: str) -> str:
@@ -126,7 +128,7 @@ def read_file(file_path: str) -> str:
     """
     try:
         with open(file_path, "r") as f:
-            return f.read()
+            return f.read(encoding="utf-8")
     except FileNotFoundError as e:
         return f"FileNotFoundError: {file_path}"
 
