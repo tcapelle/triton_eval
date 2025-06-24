@@ -78,17 +78,18 @@ else:
 new_ds = []
 for i, call in enumerate(calls):
     print(f"processing {i} of {len(calls)}")
-    row = call.inputs["example"].copy()
-    row["is_correct"] = call.output["scores"]["run_scorer"]["is_correct"]
-    row["triton_runs"] = call.output["scores"]["run_scorer"]["triton_runs"]
-    new_ds.append(row)
+    try:
+        row = call.inputs["example"].copy()
+        row["is_correct"] = call.output["scores"]["run_scorer"]["is_correct"]
+        row["triton_runs"] = call.output["scores"]["run_scorer"]["triton_runs"]
+        new_ds.append(row)
+    except Exception as e:
+        print(f"Error processing call {i}: {e}")
+        continue
 
 ds = Dataset.from_list(new_ds)
 print(ds[0])
 
-ds.filter(lambda x: x["is_correct"] < 8)
+ds = ds.filter(lambda x: x["is_correct"] < 8)
 ds.save_to_disk("calls_with_is_correct.json")
-
-
-# ds = Dataset.from_list(calls)
-# ds.save_to_disk("calls.json")
+ds.push_to_hub("tcapelle/boostrap_oai_pt_think_ep1")
