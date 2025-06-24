@@ -99,7 +99,6 @@ def call_model(
             messages=[{"role": "system", "content": system_prompt}, 
                         {"role": "user", "content": user_prompt},
                     ],
-            n=num_generations,
             temperature=temperature,
             max_tokens=max_tokens,
             **model_kwargs
