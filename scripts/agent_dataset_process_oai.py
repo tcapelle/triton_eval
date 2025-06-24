@@ -72,8 +72,8 @@ client = openai.AsyncOpenAI()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/boostrap_oai"
-    output_dataset: str = "tcapelle/boostrap_oai"
+    input_dataset: str = "tcapelle/bootstrap_oai_pt"
+    output_dataset: str = "tcapelle/bootstrap_oai_pt"
     weave_project: str = "grpo-cuda/dataset_agent_oai"
     push: bool = False
     num_proc: int = 10
@@ -135,7 +135,7 @@ weave.init(args.weave_project)
 
 def get_current_cookbook() -> str:
     """Get the current cookbook content, used to reload after updates"""
-    return (args.data_path / "triton_cookbook.md").read_text()
+    return (args.data_path / "triton_cookbook.md").read_text(encoding="utf-8")
 
 ############################################
 
@@ -377,11 +377,13 @@ async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[ExecutionCon
     if not ctx.pt_runs or not ctx.triton_runs:
         return "Cannot compare - one or both implementations failed to run"
     
-    match_results = compare_outputs(ctx.pt_stdout, ctx.triton_stdout)
+    match_results = compare_outputs(ctx.pt_stdout, ctx.triton_stdout)["results"] #    {"match": all_passed, "results": results}
     ctx.triton_is_correct = all(status == "PASS" for name, status, msg, _ in match_results)
-    
-    results_str = "\n".join([f"{name}: {status} ({msg})" for name, status, msg, _ in match_results])
-    return f"Test Results:\n{results_str}"
+    if ctx.triton_is_correct:
+        return "The Triton code is correct"
+    else:
+        results_str = "\n".join([f"{name}: {status} ({msg})" for name, status, msg, _ in match_results])
+        return f"You are failing the following tests: ```python{ctx.pt_tests}```\n\nTest Results:\n{results_str}"
 
 @function_tool
 async def update_cookbook_with_error_knowledge(
