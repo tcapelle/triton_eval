@@ -55,6 +55,7 @@ AVAILABLE_GPUS = [4, 5, 6, 7]
 class ScriptArgs:
     trials: int = 1
     model_name: str = MODEL_NAME
+    custom_base_url: str = "http://0.0.0.0:8000/v1"
     temperature: float = TEMPERATURE
     max_tokens: int = 12_000
     weave_project: str = "grpo-cuda/triton-bench"
@@ -71,7 +72,7 @@ print(args)
 
 
 if not args.use_openai:
-    CUSTOM_BASE_URL = "http://0.0.0.0:8000/v1"
+    CUSTOM_BASE_URL = args.custom_base_url
 else:
     CUSTOM_BASE_URL = None
 
