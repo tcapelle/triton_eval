@@ -20,6 +20,8 @@ import uuid # Add uuid for unique module names
 import pynvml
 import psutil
 
+torch.set_printoptions(threshold=int(1e9))
+
 def is_fatal_error(exception) -> bool:
     """Checks if an exception should cause the worker to terminate."""
     # Triton compilation errors are considered fatal
@@ -626,7 +628,7 @@ def worker_main(task_queue, result_queue, gpu_id):
             if gpu_handle:
                 try:
                     mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
-                    gpu_mem_used_gb = mem_info.used / (1024**3) # Convert bytes to GiB
+                    gpu_mem_used_gb = float(mem_info.used) / (1024**3) # Convert bytes to GiB
                 except pynvml.NVMLError as nvml_err:
                      print(f"[Worker PID {os.getpid()}] [WARN] Failed to get GPU memory info: {nvml_err}", file=original_stderr_for_logging, flush=True)
 
