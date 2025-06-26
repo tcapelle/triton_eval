@@ -25,7 +25,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 console = Console()
 
-MODEL_NAME = "qwen3-32b-grpo"
+MODEL_NAME = "/model-checkpoints/sft-qwen3-32b-boot/"
 
 
 
