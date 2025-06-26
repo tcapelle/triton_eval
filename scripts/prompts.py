@@ -948,7 +948,7 @@ Two fenced Python code blocks:
    - Contains concise comments linking back to key Conversion Plan steps.
 
 
-To make our life easier, enclose all the reasoning and conversion plan with <reasoning> ... </reasoning> tags. For the final implementation, reply with a single blob of code enclosed with <triton> ... </triton> tags.
+To make our life easier, enclose all the reasoning and conversion plan with <{reasoning_token}> ... </{reasoning_token}> tags. For the final implementation, reply with a single blob of code enclosed with <triton> ... </triton> tags.
 
 ---
 

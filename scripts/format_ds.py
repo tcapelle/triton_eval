@@ -53,4 +53,4 @@ def format_example(example):
 
 if not args.debug:
    formatted_ds = ds.map(format_example)
-   formatted_ds.push_to_hub(args.ds_name + "_think")
+   formatted_ds.push_to_hub(args.ds_name)
