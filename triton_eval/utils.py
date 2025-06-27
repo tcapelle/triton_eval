@@ -1,6 +1,7 @@
 import re
 import ast
 import numpy as np
+from typing import Any
 
 from copy import deepcopy
 import weave
@@ -13,14 +14,27 @@ async def map(ds, func, num_proc=10):
         "Wrapper to make the function async"
         return await async_call(func, row)
     
-    results = []
+    # Pre-allocate results so we can write into the correct slot and preserve
+    # the original order, regardless of the order in which the asynchronous
+    # tasks complete.
+    results: list[Any] = [None] * len(ds)
     n_complete = 0
+
     async for i, input_row, out_row in async_foreach(ds, apply_func, max_concurrent_tasks=num_proc):
-        input_row_copy: dict = deepcopy(dict(input_row))
-        input_row_copy.update(out_row)
-        results.append(input_row_copy)  # Use the copy instead of original
+
+        # Deep-copy both the input row and the function output so that no
+        # references to the original objects (which may be mutated elsewhere)
+        # are kept inside the returned structure.
+        merged_row: dict = deepcopy(input_row)
+        merged_row.update(deepcopy(out_row))
+
+        # Store in the position corresponding to the input index. This keeps
+        # the result ordering identical to the input ordering.
+        results[i] = merged_row
+
         n_complete += 1
         print(f"Completed {n_complete} / {len(ds)}")
+
     return results
 
 

@@ -94,7 +94,7 @@ async def format_row(row):
 
 
 
-# weave.init(args.weave_project)
+weave.init(args.weave_project)
 
 if args.debug:
     ds = ds.select(range(10))
