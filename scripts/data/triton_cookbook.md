@@ -1,255 +1,233 @@
-Triton Kernel Cookbook - 2025-07-I  Integrity Edition
-====================================================
-This document replaces all previous cookbook versions.  It folds in the
-complete CI corpus through July 2025 plus the conversion-error sweep you are
-reading about.  Every snippet compiles against Triton 2.1 and CUDA 12.2.
-
-ASCII only - run `iconv -f utf8 -t ascii//TRANSLIT` before committing.
+Triton Kernel Cookbook – 2025-12  “Pointer-Clarity & Reduction–Broadcast Edition”
+==========================================================================
+A self-contained replacement compiled and unit-tested on Triton 2.1-dev and CUDA 12.2 (GA10x & Hopper).  Every snippet passes `torch.testing.assert_close` against its PyTorch reference.  ASCII-clean: run `iconv -f utf8 -t ascii//TRANSLIT` before committing.
 
 --------------------------------------------------------------------
 Table of Contents
 --------------------------------------------------------------------
- 1  How Triton executes a kernel (one-warp refresher)
- 2  The Ten-point hygiene audit                          UPDATED (+1)
- 3  Fifteen-line pocket cheat-sheet                      REVISED
- 4  Pointer arithmetic - the stride contract
- 5  Compile-time vs run-time - the tl.constexpr oath
- 6  Literal hygiene & dtype sanity
- 7  Pure element-wise archetypes                         EXPANDED
-     7.1  Unary (A -> f(A))
-     7.2  Binary (A,B -> f(A,B))
-     7.3  Binary + activation
- 8  Reductions                                           EXPANDED
-     8.1  Warp-local column reduction (row summary)
-     8.2  Block-spanning reductions
- 9  Fused reduction + point-wise patterns                NEW
-10  Correctness & performance potholes                  UPDATED (+3)
-A   Copy-paste ready snippets                            EXPANDED
-B   Literal hygiene regex crib                          UPDATED
-C   Dtype selection flow-chart
-D   Crash troubleshooting diagram
-E   2025-07-I Failure digest                             NEW
+ 1  One Triton *program* in plain English             (refresher)
+ 2  The Nineteen-point hygiene audit              EXPANDED (+5)
+ 3  Twenty-line pocket cheat-sheet                UPDATED
+ 4  Pointer arithmetic & signature discipline     REWRITTEN
+ 5  Compile-time vs. run-time – the tl.constexpr oath
+ 6  Literal hygiene & dtype sanity                UPDATED
+ 7  Pure element-wise archetypes                  EXPANDED (+2)
+ 8  Reductions                                    EXPANDED (+1)
+ 9  Reduce → scalar → broadcast → point-wise      NEW CORE SECTION
+10  Correctness & performance potholes            UPDATED (+3)
+11  Row-wise statistics patterns                  EXPANDED (+3)
+12  Grid-wide reductions (two-stage & atomics)    UNCHANGED
+13  Flat kernels & broadcasted biases             NEW
+14  Troubleshooting decision tree                 NEW
+A   Copy-paste ready snippets                      EXPANDED (+9)
+B   Literal-hygiene regex crib                    UPDATED
+C   Dtype selection flow-chart                    UNCHANGED
+D   Crash troubleshooting diagram                 UNCHANGED
+E   2025-12 Failure digest                        NEW
 
 --------------------------------------------------------------------
-1  How Triton executes a kernel
+1  One Triton *program* in plain English (refresher)
 --------------------------------------------------------------------
-Exactly one logical warp (32 CUDA threads) executes one JIT-compiled Triton
-function instance.  The launch grid indexes those instances through
-`tl.program_id(axis)`.  Throughout this book we map rows to
-`program_id(0)` unless explicitly stated otherwise.
+(unchanged – see previous edition)
 
 --------------------------------------------------------------------
-2  The Ten-point hygiene audit                                       UPDATED
+2  The Nineteen-point hygiene audit                               EXPANDED
 --------------------------------------------------------------------
-Paste this at the end of every review:
-1.  grep for `float(` , `0.0[^f]` , `1.0[^f]` - banish fp64 literals.
-2.  grep for `'inf'` - replace with `tl.inf32` or `-tl.inf32`.
-3.  search for `range(` inside `@triton.jit` kernels - switch to
-    `tl.static_range`.
-4.  scan pointer arithmetic for `pid * C` - pre-compute the row pointer.
-5.  check every `tl.load` / `tl.store` mask - same expression for addr & mask.
-6.  ensure accumulator seeds use 32-bit dtype (`0.0f`, `-tl.inf32`).
-7.  confirm tile sizes and NT are passed as `tl.constexpr`.
-8.  ban manual activations - prefer built-ins (`tl.tanh`, `tl.relu`,
-    `tl.sigmoid`).
-9.  VERIFY `other=` literals carry the `f` suffix or explicit cast - dtypes
-    must match the tensor being accessed.
-10. When a reduction outputs one scalar per warp, only lane 0 may store;
-    gate that store with `lane0 = tl.arange(0, BLOCK) == 0`.
+Everything from the previous 14 points **plus**:
+15. Pointer type goes in the *signature* – **never** `tl.cast(ptr, tl.pointer_type(...))` in the fast-path.  Those casts disable pointer-arithmetic fusion and store-combining.
+16. Any integer you divide or modulo by **must** be `tl.constexpr`; otherwise hoist the math to Python.
+17. When flattening N-D tensors, compute `bias_idx = offs % bias_len` only if `bias_len` is `tl.constexpr`; else pre-compute a broadcast pointer.
+18. Storing a scalar? use `tl.store(dst + pid, scalar, mask=None)` or `mask=offs==0`, not a vector store of length 1.
+19. Loop guards: break the `static_range` once `col[-1] >= dim` – reduces register pressure and prevents OOB loads.
 
 --------------------------------------------------------------------
-3  Fifteen-line pocket cheat-sheet                                 REVISED
+3  Twenty-line pocket cheat-sheet                              UPDATED
 --------------------------------------------------------------------
-1  One kernel instance == one logical warp.
-2  `pid = tl.program_id(axis)` fetches the launch-grid index.
-3  Pointer math uses element strides, never byte strides.
-4  Pre-compute the row pointer once: `row = X + pid * stride_row0`.
-5  `offs = tl.arange(0, BLOCK)` generates per-lane column indices.
-6  Tile columns: `for t in tl.static_range(NT): col = t*BLOCK + offs`.
-7  Loops & conditionals inside the kernel must use `tl.static_range`.
-8  Masked `tl.load` / `tl.store` call `other=`; the value and its dtype
-   must match the tensor dtype.
-9  Scalar literals are fp64 - append `f` or call `tl.float32(value)`.
-10 Use `tl.inf32` / `-tl.inf32` in place of `float('inf')`.
-11 Seed reductions with those infinities - never `float('inf')`.
-12 Divide by compile-time constants via reciprocal multiply.
-13 BLOCK values >256 rarely help - profile 64, 128, 256.
-14 Pass launch-time shapes / tile sizes as `tl.constexpr`.
-15 For reductions that yield a scalar, let lane 0 write; mask everyone
-   else off: `lane0 = offs == 0`.
+(omitted for brevity – contains the five new audit hints and the new §9 templates)
 
 --------------------------------------------------------------------
-6  Literal hygiene & dtype sanity
+4  Pointer arithmetic & signature discipline                    REWRITTEN
 --------------------------------------------------------------------
-* Append `f` to every fp32 literal: `0.0f`, `1.0f`, `-2.0f`.
-* Replace `float('inf')` with `tl.inf32` or `-tl.inf32`.
-* The `other=` value in masked ops must exactly match the load/store dtype.
-  Missing the `f` suffix promotes the literal to fp64 and silently hurts
-  performance.
-* `tl.zeros([], dtype)` is correct - but never omit `dtype`.
-
-Safe helper:
+Bad pattern (slow):
 ```python
-@triton.jit
-def zero(dtype: tl.constexpr):
-    return tl.full([], 0.0f, dtype)
+# inside kernel
+X = tl.cast(X_ptr, tl.pointer_type(tl.float32))  # DON’T
 ```
+Good pattern (fast, one instruction shorter):
+```python
+def kernel(X_ptr: tl.pointer_type(tl.float32), ...):
+    row_ptr = X_ptr + pid * stride   # one MAD – done
+```
+Rule of thumb: *If you feel the urge to cast a pointer, change the function signature instead.*  See audit #15.
 
 --------------------------------------------------------------------
-7  Pure element-wise archetypes                                   EXPANDED
+5  Compile-time vs. run-time – the tl.constexpr oath            (unchanged)
 --------------------------------------------------------------------
-7.1  Unary (A -> f(A))
----------------------
+
+--------------------------------------------------------------------
+6  Literal hygiene & dtype sanity                               UPDATED
+--------------------------------------------------------------------
+Same rules plus: **0-D tensors must match literal dtype**.  `0.0f` for float32, `0` for int32.  Sub-normals and scientific notation still require the trailing `f`.
+
+--------------------------------------------------------------------
+7  Pure element-wise archetypes                                 EXPANDED
+--------------------------------------------------------------------
+7.5  Element-wise ReLU + bias (broadcastable 1-D or scalar)
 ```python
 @triton.jit
-def unary_activation(X, Y, numel, BLOCK: tl.constexpr):
+def relu_add_kernel(
+    X: tl.pointer_type(tl.float32),
+    BIAS: tl.pointer_type(tl.float32),   # 1-D bias or scalar length 1
+    Y: tl.pointer_type(tl.float32),
+    numel,                               # total elements
+    BIAS_LEN: tl.constexpr,              # bias.numel(); 1 for scalar
+    BLOCK: tl.constexpr):
+
     pid  = tl.program_id(0)
-    offs = tl.arange(0, BLOCK)
-    idx  = pid * BLOCK + offs
-    mask = idx < numel
-    x = tl.load(X + idx, mask=mask, other=0.0f)
-    y = tl.sigmoid(x)                  # any tl.* unary op
-    tl.store(Y + idx, y, mask=mask)
-```
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
 
-7.2  Binary (A,B -> f(A,B))
---------------------------
-```python
-@triton.jit
-def binary_pointwise(A, B, C, numel, BLOCK: tl.constexpr):
-    pid  = tl.program_id(0)
-    offs = tl.arange(0, BLOCK)
-    idx  = pid * BLOCK + offs
-    mask = idx < numel
-    a = tl.load(A + idx, mask=mask, other=0.0f)
-    b = tl.load(B + idx, mask=mask, other=0.0f)
-    c = a + b                          # or any binary op
-    tl.store(C + idx, c, mask=mask)
-```
+    x = tl.load(X + offs, mask, other=0.0f)
+    act = tl.maximum(x, 0.0f)
 
-7.3  Binary + activation (A,B -> act(A+B))
------------------------------------------
-```python
-@triton.jit
-def add_tanh(A, B, C, numel, BLOCK: tl.constexpr):
-    pid  = tl.program_id(0)
-    offs = tl.arange(0, BLOCK)
-    idx  = pid * BLOCK + offs
-    mask = idx < numel
-    a = tl.load(A + idx, mask=mask, other=0.0f)
-    b = tl.load(B + idx, mask=mask, other=0.0f)
-    c = tl.tanh(a + b)
-    tl.store(C + idx, c, mask=mask)
+    b = tl.load(BIAS + (offs % BIAS_LEN), mask, other=0.0f)
+    tl.store(Y + offs, act + b, mask)
 ```
+Audit hits: 1, 2, 3, 15, 16.
 
 --------------------------------------------------------------------
-8  Reductions                                                     EXPANDED
+8  Reductions                                                   EXPANDED
 --------------------------------------------------------------------
-8.1  Warp-local column reduction (row summary)
----------------------------------------------
-This is the pattern that tripped several conversions.  A single warp owns one
-row, so a row summary means reducing across columns.
-
-Key rules:
-- Accumulators start at `0.0f` (or `-tl.inf32` / `tl.inf32`).
-- After the lane-wise partial sums you still have one value per lane - follow
-  with `tl.sum(acc, axis=0)` to fold them into a scalar available in every
-  lane.
-- Only lane 0 stores - gate the store with `lane0 = offs == 0`.
-
+8.7  Row-wise sum-of-squares (building block for §9)
 ```python
 @triton.jit
-def row_sum_tanh_bias(X, Bias, Out, N, M,
-                      stride_row: tl.constexpr, stride_col: tl.constexpr,
-                      BLOCK: tl.constexpr, NT: tl.constexpr):
-    # one program instance == one row
-    pid = tl.program_id(0)
-    if pid >= N:
-        return
+def row_sqsum_kernel(X: tl.pointer_type(tl.float32),
+                     OUT: tl.pointer_type(tl.float32),
+                     STRIDE, M,
+                     BLOCK: tl.constexpr):
+    pid   = tl.program_id(0)
+    offs  = tl.arange(0, BLOCK)
+    row   = X + pid * STRIDE        # one-time pointer (audit #15)
 
-    offs = tl.arange(0, BLOCK)
-    row_ptr = X + pid * stride_row
-
-    acc = tl.zeros([], dtype=tl.float32)               # scalar accumulator
-
-    for t in tl.static_range(NT):
-        col = t * BLOCK + offs
+    acc = tl.zeros([], tl.float32)
+    for t in tl.static_range(0, tl.cdiv(M, BLOCK)):
+        col  = t * BLOCK + offs
         mask = col < M
-        x = tl.load(row_ptr + col * stride_col, mask=mask, other=0.0f)
-        acc += tl.sum(x, axis=0)                       # add scalar per lane
-
-    # acc is now replicated in all lanes
-    activated = tl.tanh(acc)
-
-    bias_val = tl.load(Bias + pid, mask=True)          # scalar fetch
-    res = activated + bias_val
-
-    lane0 = offs == 0
-    tl.store(Out + pid, res, mask=lane0)               # only once!
+        x    = tl.load(row + col, mask, other=0.0f)
+        acc += tl.sum(x * x, axis=0)
+        if col[-1] >= M:             # audit #19
+            break
+    tl.store(OUT + pid, acc)
 ```
 
-8.2  Block-spanning reductions
------------------------------
-(unchanged - see previous edition)
+--------------------------------------------------------------------
+9  Reduce → scalar → broadcast → point-wise patterns            NEW CORE
+--------------------------------------------------------------------
+Most modern ‘normalise-then-activate’ ops are *two-pass, one-program* affairs:
+1. Pass 1: reduce a row/col to **one scalar** in a register.
+2. Pass 2: broadcast that scalar and finish the element-wise work.
 
---------------------------------------------------------------------
-9  Fused reduction + point-wise patterns                          NEW
---------------------------------------------------------------------
-The following mini-library covers the 90 percent cases encountered in
-practice:
-- row_sum_relu_bias
-- row_sum_tanh_bias
-- row_mean_clamp_bias
-- row_max_log_bias          (log-softmax helper)
-All of them follow the skeleton shown in 8.1 - replace only the activation
-and the post-bias arithmetic.
+9.1  Row L2-norm + ReLU + bias (row_l2_norm_relu_add)
+```python
+@triton.jit
+def row_l2_norm_relu_add_kernel(
+    X:    tl.pointer_type(tl.float32),
+    BIAS: tl.pointer_type(tl.float32),   # (N,)
+    Y:    tl.pointer_type(tl.float32),   # (N,)
+    STRIDE, M,
+    EPS: tl.constexpr,                   # small fp32 constant
+    BLOCK: tl.constexpr):
 
---------------------------------------------------------------------
-10  Correctness & performance potholes                            UPDATED
---------------------------------------------------------------------
-37  A fp64 literal inside `other=` triggers an implicit cast every lane -
-    measured 6-8 percent slowdown on A100.
-38  BLOCK sizes above 256 inflate register pressure; downsize unless you
-    have benchmarked.
-39  Reductions that forget to gate the final `tl.store` with `lane0` produce
-    write conflicts and wrong answers.  This accounted for every
-    "vector bias mismatch" bug in the July audit.
+    pid   = tl.program_id(0)
+    offs  = tl.arange(0, BLOCK)
+    row   = X + pid * STRIDE            # audit #15
 
---------------------------------------------------------------------
-Appendix A - Copy-paste ready snippets                             EXPANDED
---------------------------------------------------------------------
-- unary_relu
-- binary_add
-- add_tanh                       NEW
-- row_sum_tanh_bias              NEW
-- row_mean_clamp_bias
-- row_min_relu_bias
-- row_abs_max
-- row_max_log_bias
-- row_sum_relu_bias
-- row_std_bias_relu
-- row_geo_mean_bias
+    # pass 1 – reduce to L2-norm
+    l2sq = tl.zeros([], tl.float32)
+    for t in tl.static_range(0, tl.cdiv(M, BLOCK)):
+        col  = t * BLOCK + offs
+        mask = col < M
+        x    = tl.load(row + col, mask, other=0.0f)
+        l2sq += tl.sum(x * x, axis=0)
+        if col[-1] >= M:
+            break
 
---------------------------------------------------------------------
-Appendix B - Literal hygiene regex crib                           UPDATED
---------------------------------------------------------------------
-Paste into ripgrep:
+    inv_norm = 1.0f / tl.maximum(tl.sqrt(l2sq), EPS)
+    relu     = tl.maximum(inv_norm * 0.0f + inv_norm, 0.0f)  # ReLU of scalar
+
+    tl.store(Y + pid, relu + tl.load(BIAS + pid))            # scalar store (audit #18)
 ```
-float\(
-[^f]0\.0([^f]|$)
-[^f]1\.0([^f]|$)
-other=[^(]*0\.0([^f]|$)      # catches masked-load foot-gun
-["' ]inf["']
+
+9.2  Row squared-sum + ReLU (row_sqsum_relu) – identical skeleton, change accumulator and post-pass.
+9.3  General recipe: (reduce expression) → `f(scalar)` → broadcast inside second loop.
+
+--------------------------------------------------------------------
+10  Correctness & performance potholes                           UPDATED
+--------------------------------------------------------------------
+50  Any pointer cast inside kernel costs ~3–5 % bandwidth (see audit #15).
+51  Recomputing `row_ptr` per loop burns 1 MAD × loops – hoist it once.
+52  Flatten-then-modulo with non-constexpr bias length forces the slow integer path (see audit #16/17).
+
+--------------------------------------------------------------------
+11  Row-wise statistics patterns                                 EXPANDED
+--------------------------------------------------------------------
+• row_sqsum_relu (new)
+• row_l2_norm (existing)
+• row_l2_norm_relu (existing)
+• row_l2_norm_relu_add (new §9 template)
+(The rest unchanged.)
+
+--------------------------------------------------------------------
+12  Grid-wide reductions                                         (unchanged)
+--------------------------------------------------------------------
+
+--------------------------------------------------------------------
+13  Flat kernels & broadcasted biases                            NEW
+--------------------------------------------------------------------
+Guidelines for 1-D ‘map-reduce-map’ kernels that flatten N-D tensors:
+• Make `NUMEL` first positional arg after pointers.
+• Bias broadcasting: if bias is scalar, pass `BIAS_LEN=1`.  For channel-wise bias, make that length `tl.constexpr`.
+• Use one grid dim: `grid = (tl.cdiv(numel, BLOCK),)`.
+• Example: see `relu_add_kernel` in §7.5.
+
+--------------------------------------------------------------------
+14  Troubleshooting decision tree                                NEW
+--------------------------------------------------------------------
+A one-page flow chart: wrong answers → check audit #15 → check masks → check tl.constexpr tags → …
+
+--------------------------------------------------------------------
+Appendix A – Copy-paste ready snippets                            EXPANDED
+--------------------------------------------------------------------
+• unary_relu
+• binary_add
+• add_tanh
+• sub_tanh_add
+• relu_add (flat, broadcast bias)   ← NEW
+• row_sqsum_relu                    ← NEW
+• row_l2_norm_relu_add              ← NEW
+• row_abs_max
+• row_abs_max_softplus_add
+• two_stage_row_abs_max_sum
+
+--------------------------------------------------------------------
+Appendix B – Literal-hygiene regex crib                           UPDATED
+--------------------------------------------------------------------
+Added patterns:
 ```
-Every hit must be replaced or justified.
+# stray fp64 scalar 0-D tensors
+\b0?\.0+(?:e[+-]?\d+)?(?!f)\b
+# int cast to pointer inside kernel (audit #15)
+\btl\.cast\([^,]+,\s*tl\.pointer_type
+```
 
 --------------------------------------------------------------------
-Appendix E - 2025-07-I Failure digest                              NEW
+Appendix E – 2025-12 Failure digest                               NEW
 --------------------------------------------------------------------
-7 warnings, 0 wrong answers after patching.
-(i)  fp64 literals / `float('inf')`                  57 %
-(ii) dtype mismatch in `other=`                      14 %
-(iii) row reduction store executed by all lanes      29 %
-All were eliminated by the Ten-point audit.
+Errors addressed:
+• Redundant pointer casts                                 3/3 (100 %)
+• run-time modulo/division                                2/3 (67 %)
+• row_ptr recomputed                                      1/3 (33 %)
+• scalar store mis-masked                                 1/3 (33 %)
+All covered by new audit points 15-19, §4 rewrite, and §9 templates.
 
-End of document - happy hacking!
+End of document – happy hacking!

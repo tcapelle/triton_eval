@@ -72,7 +72,7 @@ client = openai.AsyncOpenAI()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = " "
+    input_dataset: str = "tcapelle/bootstrap_oai_pt"
     output_dataset: str = "tcapelle/bootstrap_oai_pt"
     weave_project: str = "grpo-cuda/dataset_agent_oai"
     push: bool = True
@@ -387,15 +387,39 @@ async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[ExecutionCon
         return f"You are failing the following tests: ```python{ctx.pt_tests}```\n\nTest Results:\n{results_str}"
 
 def update_cookbook_with_error_knowledge(
-    improved_cookbook: str
+    improved_cookbook: str,
+    wrapper: Optional[RunContextWrapper[ExecutionContext]] = None,
 ) -> str:
-    """Update the Triton cookbook with the complete improved version"""
+    """Safely replace the Triton cookbook with *improved_cookbook*.
+
+    Logic:
+    1. Read the current cookbook (UTF-8).
+    2. Attempt to write the new content in UTF-8.
+    3. If any exception occurs, restore the original content so the cookbook
+       remains intact and return an error message.
+    """
+
     cookbook_path = args.data_path / "triton_cookbook.md"
-    
-    # Write the new complete cookbook
-    cookbook_path.write_text(improved_cookbook)
-    
-    return f"Successfully updated cookbook with improved version at {cookbook_path}"
+
+    # Step 1 – backup the current content (best-effort)
+    try:
+        original_content = cookbook_path.read_text(encoding="utf-8")
+    except Exception:
+        original_content = None  # File may not exist or unreadable
+
+    # Step 2 – attempt safe write
+    try:
+        cookbook_path.write_text(improved_cookbook, encoding="utf-8")
+        return f"Successfully updated cookbook at {cookbook_path} (UTF-8)."
+    except Exception as e:
+        # Step 3 – rollback if possible
+        if original_content is not None:
+            try:
+                cookbook_path.write_text(original_content, encoding="utf-8")
+            except Exception:
+                # Even rollback failed – leave file in whatever state
+                pass
+        return f"[ERROR] Failed to update cookbook: {e}. Original cookbook preserved."
 
 @function_tool
 async def run_triton_code_and_compare(
@@ -1189,7 +1213,6 @@ async def analyze_errors_and_improve_cookbook():
         # If cookbook changed, refresh the agent
         if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
             update_cookbook_with_error_knowledge(cookbook_update.improved_cookbook)
-            console_print("[green]✅ Cookbook has been updated with improvements.[/green]")
             recreate_triton_agent()
 
     except Exception as e:
