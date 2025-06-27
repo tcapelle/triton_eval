@@ -72,7 +72,7 @@ client = openai.AsyncOpenAI()
 @dataclass
 class Args:
     debug: bool = False
-    input_dataset: str = "tcapelle/bootstrap_oai_pt"
+    input_dataset: str = " "
     output_dataset: str = "tcapelle/bootstrap_oai_pt"
     weave_project: str = "grpo-cuda/dataset_agent_oai"
     push: bool = True
@@ -346,7 +346,8 @@ async def run_code(
     else:
         full_code = code
     
-    result = run_python_code_on_gpu(full_code)
+    # Run synchronous (blocking) code in a separate thread so the event-loop can continue processing
+    result = await asyncio.to_thread(run_python_code_on_gpu, full_code)
     wrapper.context.store_execution_result(exec_type, result)
     
     summary = wrapper.context.get_execution_summary(exec_type)
