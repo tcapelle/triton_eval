@@ -12,7 +12,7 @@ import simple_parsing as sp
 import weave
 import openai
 
-from agents import Agent, Runner, RunContextWrapper, function_tool
+from agents import Agent, Runner, RunContextWrapper, function_tool, WebSearchTool
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
 from triton_eval.agents.tools import run_python_code_on_gpu
@@ -75,7 +75,7 @@ class Args:
     input_dataset: str = "tcapelle/bootstrap_oai_pt"
     output_dataset: str = "tcapelle/bootstrap_oai_pt"
     weave_project: str = "grpo-cuda/dataset_agent_oai"
-    push: bool = False
+    push: bool = True
     num_proc: int = 10
     max_turns: int = 20
     verbose: bool = False
@@ -355,7 +355,7 @@ async def run_code(
         return f"Code executed successfully. Has output: {summary['has_output']}"
     else:
         return f"""Code failed with error:\n{summary['error_summary']}.
-        Reflect on your previous attempts at fixing the error, then try fixing the error."""
+        Reflect on your previous attempts at fixing the error, it may be useful to search the web for potential solutions"""
 
 @function_tool
 async def run_pytorch_code_and_tests(
@@ -385,9 +385,7 @@ async def compare_pytorch_triton_outputs(wrapper: RunContextWrapper[ExecutionCon
         results_str = "\n".join([f"{name}: {status} ({msg})" for name, status, msg, _ in match_results])
         return f"You are failing the following tests: ```python{ctx.pt_tests}```\n\nTest Results:\n{results_str}"
 
-@function_tool
-async def update_cookbook_with_error_knowledge(
-    wrapper: RunContextWrapper[ExecutionContext],
+def update_cookbook_with_error_knowledge(
     improved_cookbook: str
 ) -> str:
     """Update the Triton cookbook with the complete improved version"""
@@ -598,6 +596,8 @@ Why this version is "good":
 - All loads/stores use mask, so partial blocks at the end won't run out of bounds.
 - It's clear that tl.maximum(x_vals, 0.0) implements ReLU.
 
+Whenever you hit an error search the web up to date documentation for the error and a potential solution. Specially if you already attempted to fix the error.
+
 Once you have working triton code that matches the pytorch output, you MUST transfer to the Triton Output Agent to format the results. Do not provide any final response yourself - always transfer to the output agent.
 """
 
@@ -696,7 +696,7 @@ pt_output_agent = Agent[ExecutionContext](
 triton_output_agent = Agent[ExecutionContext](
     name="TritonOutputAgent",
     handoff_description="Specialist agent for extracting and formatting Triton code into structured output with reasoning",
-    model="o4-mini",
+    model="o4-mini", 
     instructions=triton_output_system_prompt, 
     output_type=TritonOutput
 )
@@ -707,7 +707,7 @@ error_reflection_agent = Agent[ExecutionContext](
     handoff_description="Specialist agent for analyzing Triton conversion errors and improving the cookbook",
     model="o3",
     instructions=error_reflection_system_prompt,
-    tools=[update_cookbook_with_error_knowledge],
+    tools=[WebSearchTool()],
     output_type=CookbookUpdate
 )
 
@@ -727,7 +727,7 @@ def create_triton_agent():
         name="TritonAgent", 
         model="o4-mini",
         instructions=triton_generation_system_prompt.format(triton_cookbook=current_cookbook),
-        tools=[run_triton_code_and_compare],
+        tools=[run_triton_code_and_compare, WebSearchTool()],
         handoffs=[triton_output_agent]
     )
 
@@ -1187,6 +1187,7 @@ async def analyze_errors_and_improve_cookbook():
         
         # If cookbook changed, refresh the agent
         if isinstance(cookbook_update, CookbookUpdate) and cookbook_update.should_update:
+            update_cookbook_with_error_knowledge(cookbook_update.improved_cookbook)
             console_print("[green]✅ Cookbook has been updated with improvements.[/green]")
             recreate_triton_agent()
 
