@@ -3,10 +3,13 @@ import math
 import asyncio
 import httpx
 import os
+from torch._C import NoneType
 import weave
-from typing import Dict, Any, List
+import openai
+from copy import deepcopy
+from typing import Dict, Any, List, Union
 from verifiers.parsers import XMLParser
-from verifiers.envs import SingleTurnEnv
+from verifiers.envs import SingleTurnEnv, Environment
 from verifiers.rubrics import Rubric, RubricGroup
 
 # Import kernel validation tools
@@ -18,6 +21,7 @@ from triton_eval.kernel_checks import is_valid_kernel
 # Server configuration
 SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
 RUN_TRITON_ENDPOINT = f"/run_triton"
+BENCHMARK = True
 BENCHMARK_RUNS = 10
 
 # Valid triton.language methods
@@ -227,13 +231,13 @@ def create_static_rubric(parser: XMLParser) -> Rubric:
         parser=parser
     )
 @weave.op
-def call_triton_server(code, tests, client, url=SERVER_URL) -> Dict[str, Any]:
+def call_triton_server(code, tests, client, url=SERVER_URL, benchmark=BENCHMARK) -> Dict[str, Any]:
     triton_endpoint = f"{url}{RUN_TRITON_ENDPOINT}"
     resp = client.post(triton_endpoint,
                       json={
                           "code": code, 
                           "tests": tests,
-                          "benchmark": True,
+                          "benchmark": benchmark,
                           "benchmark_runs": BENCHMARK_RUNS
                       },
                       timeout=300.0)
@@ -254,7 +258,7 @@ class TritonAPIRubric(Rubric):
         super().__init__(parser=parser, **kwargs)
         self.add_reward_func(self.triton_execution_reward)
         self.triton_server_url = triton_server_url
-
+    
     @weave.op
     def triton_execution_reward(self, completion, answer=None, info=None, **kwargs) -> float:
         """Async reward function for code execution and performance."""
@@ -352,3 +356,138 @@ def get_triton_env(train_dataset, triton_server_url, eval_dataset=None) -> Singl
     api_rubric = TritonAPIRubric(parser, triton_server_url)
     group = RubricGroup(rubrics=[api_rubric, static_rubric])
     return SingleTurnEnv(dataset=train_dataset, rubric=group, eval_dataset=eval_dataset)
+
+
+class MutiTurnTritonEnv(Environment):
+    def __init__(self, max_turns: int = 10, triton_server_url: str = SERVER_URL, **kwargs):
+        super().__init__(**kwargs)
+        self.max_turns = max_turns
+        self.triton_server_url = triton_server_url
+    
+    @weave.op
+    def run_code(self, messages: List[Dict[str, Any]], info: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the code a return the error message and the comparison results."""
+
+        completion = messages[-1]['content']
+        
+        # Use extract_code to properly extract code from output
+        code = extract_code(completion)
+
+        tests = info.get("tests", "")
+        expected_stdout = info.get("pt_stdout", "")
+        entrypoint = info.get("entrypoint", "")
+
+        # Execute code on server synchronously
+        with httpx.Client() as client:
+            try:
+                result = call_triton_server(code, tests, client, self.triton_server_url, benchmark=False)
+            except Exception as triton_server_error:
+                # Server error raise warning
+                print(f"Triton Server Error: \n{triton_server_error}")
+                return {"runs": False, "error": str(triton_server_error), "comparison": None}
+        
+        # Check execution results
+        runs = result.get("triton_status_code", -1) == 0
+        
+        if runs:
+            comparison = compare_outputs(expected_stdout, result.get("triton_stdout", ""))
+            return {"runs": True, "error": None, "comparison": comparison}
+        
+        if not runs:
+            triton_execution_error = result.get("triton_stderr", None)
+            return {"runs": False, "error": triton_execution_error, "comparison": None}
+
+    @weave.op
+    def env_response(self,
+                     messages: List[Dict[str, Any]],
+                     state: Dict[str, Any],
+                     info: Dict[str, Any],
+                     **kwargs: Any) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """TODO: Explore tool use here"""
+        
+        fail_prompt = """The code you wrote doesn't run. The error when running the code is: 
+        {error}
+        Make sure to fix it and return the correct triton code.
+        """
+        triton_prompt = """The exeuction server errored out, try re-running the code again."""
+        incorrect_prompt = """The code runs but it is not correct. You are failing the tests:
+        {tests}
+        And here are the results of the tests execution:
+        {comparison_results}
+        Make sure to fix it and return the correct triton code.
+        """
+
+        error = state["error"]
+        if error is not None:
+            if "Triton Server Error" in error:
+                return {"role": "user", "content": triton_prompt}, state
+        
+            if not state["runs"]:
+                return {"role": "user", "content": fail_prompt.format(error=error)}, state
+        if state["runs"]:
+            tests = info.get("tests", "")
+            comparison_results = str(state["comparison"]["results"])
+            if not state["comparison"]["match"]:
+                return {"role": "user", "content": incorrect_prompt.format(tests=tests, comparison_results=comparison_results)}, state
+
+        
+    @weave.op
+    def rollout(self,
+            client: openai.OpenAI,
+            model: str,
+            prompt: Union[str, List[Dict[str, Any]]],
+            answer: str,
+            task: str = "default",
+            info: Dict[str, Any] = {},
+            sampling_args: Dict[str, Any] = {},
+            **kwargs: Any) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        is_completed = False
+        state = {"runs": False, "error": None, "comparison": None}
+        assert isinstance(prompt, list)
+        messages = deepcopy(prompt) 
+        completion = []
+        turn = 0
+        while not is_completed:
+            # generate triton code
+            response = self.get_model_response(
+                prompt=messages,
+                client=client,
+                model=model,
+                sampling_args=sampling_args,
+                message_type=self.message_type
+            )
+            messages.append({"role": "assistant", "content": response})
+            completion.append({"role": "assistant", "content": response})
+            turn += 1
+            
+            # run the code by pulling the last message
+            state = self.run_code(messages, info=info, **kwargs)
+            if turn >= self.max_turns:
+                is_completed = True
+            if state["runs"]:
+                if state["comparison"]["match"]:
+                    is_completed = True 
+                else:
+                    # append the env response to the messages if failing
+                    env_msg, state = self.env_response(messages, state, info, **kwargs)
+                    messages.append(env_msg)
+                    completion.append(env_msg)
+            else:
+                env_msg, state = self.env_response(messages, state, info, **kwargs)
+                messages.append(env_msg)
+                completion.append(env_msg)
+
+        return completion, state
+
+
+def get_multi_turn_env(train_dataset, triton_server_url, eval_dataset=None) -> MutiTurnTritonEnv:
+    parser = XMLParser(['think', 'triton'], answer_field='triton')
+    static_rubric = create_static_rubric(parser)
+    api_rubric = TritonAPIRubric(parser, triton_server_url)
+    group = RubricGroup(rubrics=[api_rubric, static_rubric])
+    return MutiTurnTritonEnv(
+        dataset=train_dataset, 
+        triton_server_url=triton_server_url, 
+        max_turns=2,
+        rubric=group, 
+        eval_dataset=eval_dataset)
