@@ -7,7 +7,7 @@ class GRPOScriptArgs:
     eval_dataset_name: str | None = None
     eval_split: str = "train"
     field_messages: str = "prompt"
-
+    multi_turn: bool = False
     wandb_entity: str = "grpo-cuda"
     wandb_project: str = "verifiers"
     wandb_name: str = "qwen-4b"

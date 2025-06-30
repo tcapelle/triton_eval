@@ -15,7 +15,7 @@ import weave
 import torch.distributed as dist
 
 from config import GRPOScriptArgs
-from triton_rewards_modular import get_triton_env
+from triton_rewards_modular import get_triton_env, get_multi_turn_env
 
 def is_main_process():
     return dist.is_initialized() and dist.get_rank() == 0
@@ -50,6 +50,7 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
 
     train_dataset = train_dataset.map(remove_last_assistant_message)
     train_dataset = train_dataset.map(lambda row: {"answer": row.get("triton_code", "")})
+    train_dataset = train_dataset.filter(lambda row: row["info"]["tests"] != "")
 
     # Map dataset columns into info key for triton_execution_reward
     def map_to_info(row):
@@ -65,7 +66,10 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
     train_dataset = train_dataset.map(map_to_info)
     if eval_dataset is not None:
         eval_dataset = eval_dataset.map(map_to_info)
-    triton_env = get_triton_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
+    if script_args.multi_turn:
+        triton_env = get_multi_turn_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
+    else:
+        triton_env = get_triton_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
 
     if is_main_process:
         print(f"Loading Triton environment with server url {script_args.triton_server_url}")
