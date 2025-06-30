@@ -344,11 +344,11 @@ class TritonAPIRubric(Rubric):
         
         return base_reward + performance_reward + memory_reward
 
-def get_triton_env(dataset, triton_server_url) -> SingleTurnEnv:
+def get_triton_env(train_dataset, triton_server_url, eval_dataset=None) -> SingleTurnEnv:
     if triton_server_url is None:
         triton_server_url = SERVER_URL
     parser = XMLParser(['think', 'triton'], answer_field='triton')
     static_rubric = create_static_rubric(parser)
     api_rubric = TritonAPIRubric(parser, triton_server_url)
     group = RubricGroup(rubrics=[api_rubric, static_rubric])
-    return SingleTurnEnv(dataset=dataset, rubric=group)
+    return SingleTurnEnv(dataset=train_dataset, rubric=group, eval_dataset=eval_dataset)

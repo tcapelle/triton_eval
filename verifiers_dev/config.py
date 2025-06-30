@@ -4,6 +4,8 @@ from dataclasses import dataclass
 class GRPOScriptArgs:
     dataset_name: str
     split: str = "train"
+    eval_dataset_name: str | None = None
+    eval_split: str = "train"
     field_messages: str = "prompt"
 
     wandb_entity: str = "grpo-cuda"

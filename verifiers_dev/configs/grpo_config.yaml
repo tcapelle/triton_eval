@@ -6,6 +6,7 @@ seed: 42
 
 model_name_or_path: "/model-checkpoints/sft-qwen3-4b-boot"
 dataset_name: "tcapelle/boostrap_oai_pt_think"
+eval_dataset_name:
 field_messages: "prompt"
 
 wandb_entity: "grpo-cuda"
