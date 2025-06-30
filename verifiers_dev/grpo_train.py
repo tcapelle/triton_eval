@@ -50,7 +50,7 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
 
     train_dataset = train_dataset.map(remove_last_assistant_message)
     train_dataset = train_dataset.map(lambda row: {"answer": row.get("triton_code", "")})
-    train_dataset = train_dataset.filter(lambda row: row["info"]["tests"] != "")
+    train_dataset = train_dataset.filter(lambda row: row.get("tests", "") != "")
 
     # Map dataset columns into info key for triton_execution_reward
     def map_to_info(row):
