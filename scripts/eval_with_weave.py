@@ -16,9 +16,6 @@ from triton_eval.kernel_checks import is_valid_kernel
 
 from prompts import eval_system_prompt, eval_user_prompt
 
-
-from prompts import eval_system_prompt, eval_user_prompt
-
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 console = Console()
@@ -47,7 +44,7 @@ MODEL_NAME = "qwen3-32b-grpo"
 
 
 
-TEMPERATURE = 0.6
+TEMPERATURE = 0.8
 TIMEOUT = 60
 AVAILABLE_GPUS = [4, 5, 6, 7]
 
