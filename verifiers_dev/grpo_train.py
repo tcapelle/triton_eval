@@ -38,10 +38,7 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
     model, tokenizer = get_model_and_tokenizer(model_args.model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
 
-
     train_dataset = load_dataset(script_args.dataset_name, split=script_args.split)
-    if script_args.eval_dataset_name is not None:
-        eval_dataset = load_dataset(script_args.eval_dataset_name, split=script_args.eval_split)
 
     def remove_last_assistant_message(row, column_name=script_args.field_messages):
         if row[column_name][-1]["role"] == "assistant":
@@ -64,8 +61,11 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
         return {"info": info}
 
     train_dataset = train_dataset.map(map_to_info)
-    if eval_dataset is not None:
+    eval_dataset = None
+    if script_args.eval_dataset_name is not None:
+        eval_dataset = load_dataset(script_args.eval_dataset_name, split=script_args.eval_split)
         eval_dataset = eval_dataset.map(map_to_info)
+
     if script_args.multi_turn:
         triton_env = get_multi_turn_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
     else:
