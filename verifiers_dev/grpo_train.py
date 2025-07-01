@@ -18,7 +18,10 @@ from config import GRPOScriptArgs
 from triton_rewards_modular import get_triton_env, get_multi_turn_env
 
 def is_main_process():
-    return dist.is_initialized() and dist.get_rank() == 0
+    if dist.is_initialized():
+        return dist.get_rank() == 0
+    else:
+        return True
 
 def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: ModelConfig):
     set_seed(training_args.seed)
@@ -66,8 +69,12 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
         eval_dataset = load_dataset(script_args.eval_dataset_name, split=script_args.eval_split)
         eval_dataset = eval_dataset.map(map_to_info)
 
-    if script_args.multi_turn:
-        triton_env = get_multi_turn_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
+    if script_args.max_turns > 1:
+        triton_env = get_multi_turn_env(
+            train_dataset=train_dataset, 
+            triton_server_url=script_args.triton_server_url, 
+            max_turns=script_args.max_turns,
+            eval_dataset=eval_dataset)
     else:
         triton_env = get_triton_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
 
