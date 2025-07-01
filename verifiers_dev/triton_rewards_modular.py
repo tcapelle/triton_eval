@@ -393,8 +393,11 @@ class MutiTurnTritonEnv(Environment):
             comparison = compare_outputs(expected_stdout, result.get("triton_stdout", ""))
             return {"runs": True, "error": None, "comparison": comparison}
         
-        if not runs:
+        else: # it does not run
             triton_execution_error = result.get("triton_stderr", None)
+            if triton_execution_error is None:
+                # Provide a generic error message to avoid downstream None handling
+                triton_execution_error = "Unknown Triton execution error"
             return {"runs": False, "error": triton_execution_error, "comparison": None}
 
     @weave.op
@@ -406,15 +409,24 @@ class MutiTurnTritonEnv(Environment):
         """TODO: Explore tool use here"""
         
         fail_prompt = """The code you wrote doesn't run. The error when running the code is: 
+        
+        <error_message>
         {error}
-        Make sure to fix it and return the correct triton code.
+        </error_message>
+        Consider the code you wrote and the error message and write a working triton code.
         """
+        
         triton_prompt = """The exeuction server errored out, try re-running the code again."""
+
         incorrect_prompt = """The code runs but it is not correct. You are failing the tests:
+        <tests>
         {tests}
+        </tests>
         And here are the results of the tests execution:
+        <comparison_results>
         {comparison_results}
-        Make sure to fix it and return the correct triton code.
+        </comparison_results>
+        Consider the code you wrote, the tests and the comparison results. Fix the code so it passes the tests.
         """
 
         error = state["error"]
@@ -430,7 +442,13 @@ class MutiTurnTritonEnv(Environment):
             if not state["comparison"]["match"]:
                 return {"role": "user", "content": incorrect_prompt.format(tests=tests, comparison_results=comparison_results)}, state
 
-        
+        # Fallback: if no other condition matched, return a generic prompt
+        generic_msg = {
+            "role": "user",
+            "content": "An unknown issue occurred. Please review your previous response and try again with corrected Triton code."
+        }
+        return generic_msg, state
+
     @weave.op
     def rollout(self,
             client: openai.OpenAI,
@@ -442,11 +460,11 @@ class MutiTurnTritonEnv(Environment):
             sampling_args: Dict[str, Any] = {},
             **kwargs: Any) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         is_completed = False
-        state = {"runs": False, "error": None, "comparison": None}
         assert isinstance(prompt, list)
         messages = deepcopy(prompt) 
         completion = []
         turn = 0
+        state = {"runs": False, "error": None, "comparison": None}
         while not is_completed:
             # generate triton code
             response = self.get_model_response(
@@ -459,11 +477,11 @@ class MutiTurnTritonEnv(Environment):
             messages.append({"role": "assistant", "content": response})
             completion.append({"role": "assistant", "content": response})
             turn += 1
-            
+            has_error = response.startswith("[ERROR]")
             # run the code by pulling the last message
             state = self.run_code(messages, info=info, **kwargs)
-            if turn >= self.max_turns:
-                is_completed = True
+            if turn >= self.max_turns or has_error:
+                break
             if state["runs"]:
                 if state["comparison"]["match"]:
                     is_completed = True 
@@ -476,11 +494,12 @@ class MutiTurnTritonEnv(Environment):
                 env_msg, state = self.env_response(messages, state, info, **kwargs)
                 messages.append(env_msg)
                 completion.append(env_msg)
-
+        
+        state["turn"] = turn
         return completion, state
 
 
-def get_multi_turn_env(train_dataset, triton_server_url, eval_dataset=None) -> MutiTurnTritonEnv:
+def get_multi_turn_env(train_dataset, triton_server_url, max_turns=3, eval_dataset=None) -> MutiTurnTritonEnv:
     parser = XMLParser(['think', 'triton'], answer_field='triton')
     static_rubric = create_static_rubric(parser)
     api_rubric = TritonAPIRubric(parser, triton_server_url)
@@ -488,6 +507,6 @@ def get_multi_turn_env(train_dataset, triton_server_url, eval_dataset=None) -> M
     return MutiTurnTritonEnv(
         dataset=train_dataset, 
         triton_server_url=triton_server_url, 
-        max_turns=2,
+        max_turns=max_turns,
         rubric=group, 
         eval_dataset=eval_dataset)
