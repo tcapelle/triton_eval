@@ -8,6 +8,7 @@ import weave
 import openai
 from copy import deepcopy
 from typing import Dict, Any, List, Union
+from textwrap import dedent
 from verifiers.parsers import XMLParser
 from verifiers.envs import SingleTurnEnv, Environment
 from verifiers.rubrics import Rubric, RubricGroup
@@ -408,17 +409,17 @@ class MutiTurnTritonEnv(Environment):
                      **kwargs: Any) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """TODO: Explore tool use here"""
         
-        fail_prompt = """The code you wrote doesn't run. The error when running the code is: 
+        fail_prompt = dedent("""The code you wrote doesn't run. The error when running the code is: 
         
         <error_message>
         {error}
         </error_message>
         Consider the code you wrote and the error message and write a working triton code.
-        """
+        """)
         
-        triton_prompt = """The exeuction server errored out, try re-running the code again."""
+        triton_prompt = dedent("""The exeuction server errored out, try re-running the code again.""")
 
-        incorrect_prompt = """The code runs but it is not correct. You are failing the tests:
+        incorrect_prompt = dedent("""The code runs but it is not correct. You are failing the tests:
         <tests>
         {tests}
         </tests>
@@ -427,7 +428,7 @@ class MutiTurnTritonEnv(Environment):
         {comparison_results}
         </comparison_results>
         Consider the code you wrote, the tests and the comparison results. Fix the code so it passes the tests.
-        """
+        """)
 
         error = state["error"]
         if error is not None:
