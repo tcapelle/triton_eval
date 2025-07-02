@@ -359,6 +359,17 @@ def get_triton_env(train_dataset, triton_server_url, eval_dataset=None) -> Singl
     return SingleTurnEnv(dataset=train_dataset, rubric=group, eval_dataset=eval_dataset)
 
 
+def remove_thinking_block(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove the first thinking block from the messages."""
+    for message in messages:
+        if message['role'] == 'assistant':
+            content = message['content'].split("</think>")[1].strip()
+            
+            # empty thinking block
+            message['content'] = "<think>\n\n</think>\n\n" + content
+    return messages
+
+
 class MutiTurnTritonEnv(Environment):
     def __init__(self, max_turns: int = 10, triton_server_url: str = SERVER_URL, **kwargs):
         super().__init__(**kwargs)
@@ -467,6 +478,11 @@ class MutiTurnTritonEnv(Environment):
         turn = 0
         state = {"runs": False, "error": None, "comparison": None}
         while not is_completed:
+
+            # remove thinking block from previous message
+            if turn > 0:
+                messages = remove_thinking_block(messages)
+
             # generate triton code
             response = self.get_model_response(
                 prompt=messages,
@@ -475,6 +491,7 @@ class MutiTurnTritonEnv(Environment):
                 sampling_args=sampling_args,
                 message_type=self.message_type
             )
+
             messages.append({"role": "assistant", "content": response})
             completion.append({"role": "assistant", "content": response})
             turn += 1
