@@ -358,12 +358,15 @@ def get_triton_env(train_dataset, triton_server_url, eval_dataset=None) -> Singl
     group = RubricGroup(rubrics=[api_rubric, static_rubric])
     return SingleTurnEnv(dataset=train_dataset, rubric=group, eval_dataset=eval_dataset)
 
-
+@weave.op
 def remove_thinking_block(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Remove the first thinking block from the messages."""
     for message in messages:
         if message['role'] == 'assistant':
-            content = message['content'].split("</think>")[1].strip()
+            if "</think>" in message['content']:
+                content = message['content'].split("</think>")[1].strip()
+            else:
+                content = message['content']
             
             # empty thinking block
             message['content'] = "<think>\n\n</think>\n\n" + content
