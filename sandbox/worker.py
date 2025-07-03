@@ -19,6 +19,16 @@ import uuid # Add uuid for unique module names
 # Added imports for monitoring
 import pynvml
 import psutil
+from typing import Optional
+
+# Import shared types
+try:
+    from .task_types import TaskResult  # Relative import for module usage
+except ImportError:
+    from task_types import TaskResult  # Absolute import for direct execution
+
+# Environment variable to control worker verbosity
+WORKER_VERBOSE = os.getenv("WORKER_VERBOSE", "false").lower() in ("true", "1", "yes", "on")
 
 torch.set_printoptions(threshold=int(1e9))
 
@@ -79,7 +89,8 @@ def _run_benchmark(temp_file_path, task_type, benchmark_runs, original_stderr_fo
                 benchmark_functions.append((attr_name, attr))
     
     # Warmup runs to trigger kernel compilation
-    print(f"[Worker PID {os.getpid()}] Running warmup for {len(benchmark_functions)} function(s)...", file=original_stderr_for_logging, flush=True)
+    if WORKER_VERBOSE:
+        print(f"[Worker PID {os.getpid()}] Running warmup for {len(benchmark_functions)} function(s)...", file=original_stderr_for_logging, flush=True)
     
     for warmup_idx in range(5):  # More warmup runs for Triton
         try:
@@ -115,7 +126,8 @@ def _run_benchmark(temp_file_path, task_type, benchmark_runs, original_stderr_fo
             sys.stdout, sys.stderr = old_stdout, old_stderr
             pass  # Ignore warmup failures
     
-    print(f"[Worker PID {os.getpid()}] Warmup completed, starting benchmarks...", file=original_stderr_for_logging, flush=True)
+    if WORKER_VERBOSE:
+        print(f"[Worker PID {os.getpid()}] Warmup completed, starting benchmarks...", file=original_stderr_for_logging, flush=True)
     
     # Actual benchmark runs with already-compiled kernels
     for run_idx in range(benchmark_runs):
@@ -310,13 +322,17 @@ def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_comp
                     if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
                         try:
                             compiled_functions[entrypoint] = torch.compile(attr, mode=torch_compile_mode)
-                            print(f"[Worker PID {os.getpid()}] Successfully compiled specified entrypoint: {entrypoint}", file=original_stderr_for_logging, flush=True)
+                            if WORKER_VERBOSE:
+                                print(f"[Worker PID {os.getpid()}] Successfully compiled specified entrypoint: {entrypoint}", file=original_stderr_for_logging, flush=True)
                         except Exception as e:
-                            print(f"[Worker PID {os.getpid()}] Failed to compile specified entrypoint '{entrypoint}': {e}", file=original_stderr_for_logging, flush=True)
+                            if WORKER_VERBOSE:
+                                print(f"[Worker PID {os.getpid()}] Failed to compile specified entrypoint '{entrypoint}': {e}", file=original_stderr_for_logging, flush=True)
                     else:
-                        print(f"[Worker PID {os.getpid()}] Specified entrypoint '{entrypoint}' is not a compilable function", file=original_stderr_for_logging, flush=True)
+                        if WORKER_VERBOSE:
+                            print(f"[Worker PID {os.getpid()}] Specified entrypoint '{entrypoint}' is not a compilable function", file=original_stderr_for_logging, flush=True)
                 else:
-                    print(f"[Worker PID {os.getpid()}] Specified entrypoint '{entrypoint}' not found in module", file=original_stderr_for_logging, flush=True)
+                    if WORKER_VERBOSE:
+                        print(f"[Worker PID {os.getpid()}] Specified entrypoint '{entrypoint}' not found in module", file=original_stderr_for_logging, flush=True)
             
             # If no entrypoint specified or entrypoint compilation failed, try common patterns and all functions
             if not compiled_functions:
@@ -328,7 +344,8 @@ def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_comp
                         if callable(attr) and not isinstance(attr, type) and hasattr(attr, '__code__'):
                             try:
                                 compiled_functions[func_name] = torch.compile(attr, mode=torch_compile_mode)
-                                print(f"[Worker PID {os.getpid()}] Successfully compiled common function: {func_name}", file=original_stderr_for_logging, flush=True)
+                                if WORKER_VERBOSE:
+                                    print(f"[Worker PID {os.getpid()}] Successfully compiled common function: {func_name}", file=original_stderr_for_logging, flush=True)
                                 break  # Use the first successful common function
                             except:
                                 pass  # Try next common name
@@ -353,7 +370,8 @@ def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_comp
                 })
             else:
                 # Warmup the compiled functions to trigger compilation
-                print(f"[Worker PID {os.getpid()}] Running torch.compile warmup for {len(compiled_functions)} function(s)...", file=original_stderr_for_logging, flush=True)
+                if WORKER_VERBOSE:
+                    print(f"[Worker PID {os.getpid()}] Running torch.compile warmup for {len(compiled_functions)} function(s)...", file=original_stderr_for_logging, flush=True)
                 
                 # Run multiple warmup passes with compiled functions
                 for warmup_idx in range(5):  # More warmup runs for torch.compile
@@ -384,7 +402,8 @@ def _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_comp
                         sys.stdout, sys.stderr = old_stdout, old_stderr
                         pass  # Ignore warmup failures
                 
-                print(f"[Worker PID {os.getpid()}] torch.compile warmup completed, starting benchmarks...", file=original_stderr_for_logging, flush=True)
+                if WORKER_VERBOSE:
+                    print(f"[Worker PID {os.getpid()}] torch.compile warmup completed, starting benchmarks...", file=original_stderr_for_logging, flush=True)
                 
                 # Now run actual benchmark runs with properly warmed-up compiled functions
                 for run_idx in range(benchmark_runs):
@@ -467,7 +486,8 @@ def worker_main(task_queue, result_queue, gpu_id):
 
     original_stderr_for_logging = sys.__stderr__ # Capture original stderr early
 
-    print(f"[Worker PID {os.getpid()}] Bound to GPU {gpu_id}. Initializing monitoring...", file=original_stderr_for_logging, flush=True)
+    if WORKER_VERBOSE:
+        print(f"[Worker PID {os.getpid()}] Bound to GPU {gpu_id}. Initializing monitoring...", file=original_stderr_for_logging, flush=True)
 
     # --- Monitoring Setup ---
     nvml_initialized = False
@@ -478,19 +498,22 @@ def worker_main(task_queue, result_queue, gpu_id):
         # Even though CUDA_VISIBLE_DEVICES is set, nvml still sees all GPUs.
         # We need to get the handle for the *correct* GPU based on the original gpu_id.
         gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
-        print(f"[Worker PID {os.getpid()}] NVML initialized successfully for GPU {gpu_id}.", file=original_stderr_for_logging, flush=True)
+        if WORKER_VERBOSE:
+            print(f"[Worker PID {os.getpid()}] NVML initialized successfully for GPU {gpu_id}.", file=original_stderr_for_logging, flush=True)
     except pynvml.NVMLError as nvml_err:
         print(f"[Worker PID {os.getpid()}] [WARN] Failed to initialize NVML or get GPU handle: {nvml_err}", file=original_stderr_for_logging, flush=True)
         # Worker can continue, but GPU metrics won't be available
     # --- End Monitoring Setup ---
 
 
-    print(f"[Worker PID {os.getpid()}] Importing libraries...", file=original_stderr_for_logging, flush=True)
+    if WORKER_VERBOSE:
+        print(f"[Worker PID {os.getpid()}] Importing libraries...", file=original_stderr_for_logging, flush=True)
 
     while True:
         task_data = task_queue.get()
         if task_data is None:
-            print(f"[Worker PID {os.getpid()}] Received poison pill. Exiting.", file=original_stderr_for_logging, flush=True)
+            if WORKER_VERBOSE:
+                print(f"[Worker PID {os.getpid()}] Received poison pill. Exiting.", file=original_stderr_for_logging, flush=True)
             break # Exit loop cleanly
         
         # Handle both old format (tuple) and new format (dict) for backward compatibility
@@ -573,7 +596,8 @@ def worker_main(task_queue, result_queue, gpu_id):
                         benchmark_std_time_ms = benchmark_results["std_time_ms"] 
                         benchmark_memory_peak_mb = benchmark_results["memory_peak_mb"]
                         benchmark_successful_runs = benchmark_results["successful_runs"]
-                        print(f"[Worker PID {os.getpid()}] Triton task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms", file=original_stderr_for_logging, flush=True)
+                        if WORKER_VERBOSE:
+                            print(f"[Worker PID {os.getpid()}] Triton task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms", file=original_stderr_for_logging, flush=True)
                     elif task_type == "pytorch":
                         # Use PyTorch-specific benchmarking with entire module execution and optional torch.compile
                         benchmark_results = _run_pytorch_benchmark(temp_file_path, task_type, benchmark_runs, torch_compile, torch_compile_mode, entrypoint, original_stderr_for_logging)
@@ -587,10 +611,11 @@ def worker_main(task_queue, result_queue, gpu_id):
                         torch_compile_benchmark_std_time_ms = benchmark_results.get("torch_compile_benchmark_std_time_ms")
                         torch_compile_speedup = benchmark_results.get("torch_compile_speedup")
                         
-                        compile_info = ""
-                        if torch_compile and torch_compile_speedup is not None:
-                            compile_info = f", torch.compile speedup: {torch_compile_speedup:.2f}x"
-                        print(f"[Worker PID {os.getpid()}] PyTorch task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms{compile_info}", file=original_stderr_for_logging, flush=True)
+                        if WORKER_VERBOSE:
+                            compile_info = ""
+                            if torch_compile and torch_compile_speedup is not None:
+                                compile_info = f", torch.compile speedup: {torch_compile_speedup:.2f}x"
+                            print(f"[Worker PID {os.getpid()}] PyTorch task {task_id} benchmarking completed: {benchmark_successful_runs}/{benchmark_runs} runs, avg {benchmark_mean_time_ms:.2f}ms{compile_info}", file=original_stderr_for_logging, flush=True)
                         
                 except Exception as bench_e:
                     print(f"[Worker PID {os.getpid()}] Task {task_id} benchmarking failed: {bench_e}", file=original_stderr_for_logging, flush=True)
@@ -646,30 +671,31 @@ def worker_main(task_queue, result_queue, gpu_id):
             # --- End Collect Metrics ---
 
             # 2. Send result back to the server (including metrics)
-            result = {
-                "task_id": task_id,
-                "status_code": status_code,
-                "stdout": result_stdout,
-                "stderr": result_stderr,
-                "gpu_mem_used_gb": gpu_mem_used_gb,
-                "cpu_percent": cpu_percent,
-                "ram_percent": ram_percent,
-                "benchmark_mean_time_ms": benchmark_mean_time_ms,
-                "benchmark_std_time_ms": benchmark_std_time_ms,
-                "benchmark_memory_peak_mb": benchmark_memory_peak_mb,
-                "benchmark_successful_runs": benchmark_successful_runs,
-                # PyTorch-specific results
-                "torch_compile_benchmark_mean_time_ms": torch_compile_benchmark_mean_time_ms,
-                "torch_compile_benchmark_std_time_ms": torch_compile_benchmark_std_time_ms,
-                "torch_compile_speedup": torch_compile_speedup,
-            }
+            result = TaskResult(
+                task_id=task_id,
+                status_code=status_code,
+                stdout=result_stdout,
+                stderr=result_stderr,
+                gpu_mem_used_gb=gpu_mem_used_gb,
+                cpu_percent=cpu_percent,
+                ram_percent=ram_percent,
+                benchmark_mean_time_ms=benchmark_mean_time_ms,
+                benchmark_std_time_ms=benchmark_std_time_ms,
+                benchmark_memory_peak_mb=benchmark_memory_peak_mb,
+                benchmark_successful_runs=benchmark_successful_runs,
+                torch_compile_benchmark_mean_time_ms=torch_compile_benchmark_mean_time_ms,
+                torch_compile_benchmark_std_time_ms=torch_compile_benchmark_std_time_ms,
+                torch_compile_speedup=torch_compile_speedup,
+            )
             try:
-                 result_queue.put(result, timeout=5)
+                 result_queue.put(result.model_dump(), timeout=5)
                  # Log success only if no error occurred before finally
                  if status_code == 0:
-                      print(f"[Worker PID {os.getpid()}] Successfully executed and sent result for {task_type} task {task_id}.", file=original_stderr_for_logging, flush=True)
+                      if WORKER_VERBOSE:
+                          print(f"[Worker PID {os.getpid()}] Successfully executed and sent result for {task_type} task {task_id}.", file=original_stderr_for_logging, flush=True)
                  else:
-                      print(f"[Worker PID {os.getpid()}] Successfully sent error result for {task_type} task {task_id}.", file=original_stderr_for_logging, flush=True)
+                      if WORKER_VERBOSE:
+                          print(f"[Worker PID {os.getpid()}] Successfully sent error result for {task_type} task {task_id}.", file=original_stderr_for_logging, flush=True)
             except Exception as put_e:
                  # Log failure to send result, regardless of task success/failure
                  print(f"[Worker PID {os.getpid()}] Failed to put result to queue for task {task_id}: {put_e}", file=original_stderr_for_logging, flush=True)
@@ -677,15 +703,19 @@ def worker_main(task_queue, result_queue, gpu_id):
             # 3. Clean up the temporary file
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
-                    print(f"[Worker PID {os.getpid()}] Task {task_id} attempting to remove temp file: {temp_file_path}", file=original_stderr_for_logging, flush=True)
+                    if WORKER_VERBOSE:
+                        print(f"[Worker PID {os.getpid()}] Task {task_id} attempting to remove temp file: {temp_file_path}", file=original_stderr_for_logging, flush=True)
                     os.remove(temp_file_path)
-                    print(f"[Worker PID {os.getpid()}] Task {task_id} successfully removed temp file: {temp_file_path}", file=original_stderr_for_logging, flush=True)
+                    if WORKER_VERBOSE:
+                        print(f"[Worker PID {os.getpid()}] Task {task_id} successfully removed temp file: {temp_file_path}", file=original_stderr_for_logging, flush=True)
                 except OSError as rm_e:
                     print(f"[Worker PID {os.getpid()}] Error removing temp file {temp_file_path}: {rm_e}", file=original_stderr_for_logging, flush=True)
             elif temp_file_path:
-                print(f"[Worker PID {os.getpid()}] Task {task_id} temp file {temp_file_path} did not exist, skipping removal.", file=original_stderr_for_logging, flush=True)
+                if WORKER_VERBOSE:
+                    print(f"[Worker PID {os.getpid()}] Task {task_id} temp file {temp_file_path} did not exist, skipping removal.", file=original_stderr_for_logging, flush=True)
             else:
-                print(f"[Worker PID {os.getpid()}] Task {task_id} no temp file path recorded, skipping removal.", file=original_stderr_for_logging, flush=True)
+                if WORKER_VERBOSE:
+                    print(f"[Worker PID {os.getpid()}] Task {task_id} no temp file path recorded, skipping removal.", file=original_stderr_for_logging, flush=True)
 
             # 4. Exit worker ONLY if a fatal error occurred (should_exit == True)
             if should_exit:
@@ -694,13 +724,15 @@ def worker_main(task_queue, result_queue, gpu_id):
         # If no fatal error occurred (should_exit is False), the loop continues to the next task implicitly
 
     # End of worker_main function (reached only on poison pill or fatal error)
-    print(f"[Worker PID {os.getpid()}] Worker main loop finished. Process exiting.", file=original_stderr_for_logging, flush=True)
+    if WORKER_VERBOSE:
+        print(f"[Worker PID {os.getpid()}] Worker main loop finished. Process exiting.", file=original_stderr_for_logging, flush=True)
 
     # --- Shutdown Monitoring ---
     if nvml_initialized:
         try:
             pynvml.nvmlShutdown()
-            print(f"[Worker PID {os.getpid()}] NVML shut down successfully.", file=original_stderr_for_logging, flush=True)
+            if WORKER_VERBOSE:
+                print(f"[Worker PID {os.getpid()}] NVML shut down successfully.", file=original_stderr_for_logging, flush=True)
         except pynvml.NVMLError as nvml_err:
             print(f"[Worker PID {os.getpid()}] [WARN] Failed to shut down NVML: {nvml_err}", file=original_stderr_for_logging, flush=True)
     # --- End Shutdown Monitoring ---

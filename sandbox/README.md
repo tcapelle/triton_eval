@@ -1,6 +1,6 @@
 # Triton/PyTorch Code Execution Server
 
-A high-performance FastAPI-based server for secure execution of Triton kernels and PyTorch code with advanced benchmarking capabilities and GPU resource management.
+A high-performance FastAPI-based server for secure execution of Triton kernels and PyTorch code with advanced benchmarking capabilities, GPU resource management, and structured result handling.
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.68+-green.svg)](https://fastapi.tiangolo.com/)
@@ -43,6 +43,12 @@ This server enables remote execution of Triton kernels and PyTorch code in isola
 - **Memory Profiling**: Peak memory usage tracking during execution
 - **Performance Comparison**: Side-by-side torch.compile vs regular PyTorch benchmarks
 - **Resource Metrics**: Detailed system resource utilization
+
+### 🎯 **New: Structured Results & Monitoring**
+- **TaskResult Class**: Clean, type-safe result handling with helper methods
+- **Rich Summaries**: Beautiful logging with emojis and key metrics
+- **Configurable Verbosity**: Control logging levels via `WORKER_VERBOSE`
+- **Status Monitoring**: Built-in `/status` endpoint and periodic status tables
 
 ## Installation
 
@@ -94,6 +100,7 @@ python client.py
 
 ```bash
 curl http://localhost:9347/
+curl http://localhost:9347/status  # New: Get detailed status
 ```
 
 ## Client Usage
@@ -133,7 +140,7 @@ if client.health_check():
 client.close()
 ```
 
-### Advanced Usage
+### Advanced Usage with TaskResult
 
 ```python
 # Custom configuration
@@ -162,6 +169,29 @@ compiled_result = client.run_pytorch(
 # Calculate speedup
 speedup = regular_result["benchmark_mean_time_ms"] / compiled_result["torch_compile_benchmark_mean_time_ms"]
 print(f"torch.compile speedup: {speedup:.2f}x")
+```
+
+### Using TaskResult in Client Code
+
+```python
+from client import TritonClient
+from sandbox.task_types import TaskResult
+
+client = TritonClient("http://localhost:9347")
+
+# Execute and get structured result
+response = client.run_triton(code, tests, benchmark=True)
+
+# Convert API response (dict) to TaskResult object using Pydantic
+result = TaskResult.model_validate(response)
+
+print(f"Task successful: {result.is_successful}")
+print(f"Has benchmarks: {result.has_benchmarks}")
+print(f"Summary: {result.get_summary()}")
+
+if result.has_benchmarks:
+    print(f"Average time: {result.benchmark_mean_time_ms:.2f}ms")
+    print(f"Successful runs: {result.benchmark_successful_runs}")
 ```
 
 ## API Reference
@@ -222,6 +252,32 @@ Execute PyTorch code with optional torch.compile benchmarking.
 }
 ```
 
+### `GET /status` (New)
+
+Get detailed server status and metrics.
+
+**Response:**
+```json
+{
+  "total_workers": 8,
+  "active_workers": 8,
+  "dead_workers": 0,
+  "worker_pool_running": true,
+  "pending_requests": 2,
+  "queue_size": 1,
+  "stats": {
+    "total_requests": 150,
+    "successful_requests": 147,
+    "failed_requests": 2,
+    "timeout_requests": 1,
+    "start_time": 1635724800.0
+  },
+  "uptime_seconds": 3600.5,
+  "gpus_configured": 8,
+  "concurrency_per_gpu": 1
+}
+```
+
 ### `POST /reset_workers`
 
 Restart all worker processes (useful for clearing GPU memory).
@@ -254,6 +310,8 @@ Health check endpoint.
 | `TASK_TIMEOUT_SECONDS` | `30` | Maximum execution time per task |
 | `WORKER_JOIN_TIMEOUT` | `20` | Timeout for graceful worker shutdown |
 | `TRITON_SERVER_URL` | `http://127.0.0.1:9347` | Server URL for client connections |
+| `WORKER_VERBOSE` | `false` | Enable verbose worker logging |
+| `STATUS_LOG_INTERVAL` | `30` | Seconds between status table logs |
 
 ### Example Configuration
 
@@ -262,11 +320,65 @@ Health check endpoint.
 export CONCURRENCY_PER_GPU=2
 export TASK_TIMEOUT_SECONDS=60
 
+# Enable verbose worker logging
+export WORKER_VERBOSE=true
+
 # Start server
 python server.py
 ```
 
+### Verbosity Control
+
+```bash
+# Quiet mode (default) - clean, minimal output
+python server.py
+
+# Verbose mode - detailed worker logging
+export WORKER_VERBOSE=true
+python server.py
+```
+
 ## Architecture
+
+### Code Structure
+
+**Core Components:**
+- `server.py` - FastAPI server with worker pool management
+- `worker.py` - Worker process execution logic
+- `task_types.py` - Shared data structures and types (TaskResult class)
+- `client.py` - Client interface for server communication
+
+**TaskResult Class:**
+The `TaskResult` class is a Pydantic BaseModel that provides structured result handling with:
+- **Type Safety**: Proper typing for all fields with automatic validation
+- **Field Validation**: Built-in constraints (e.g., `ge=0` for non-negative values)
+- **JSON Serialization**: Native `.model_dump()` and `.model_validate()` methods
+- **Helper Methods**: `is_successful`, `has_benchmarks`, `has_torch_compile_results`
+- **Rich Summaries**: `get_summary()` for beautiful logging
+- **FastAPI Integration**: Seamless integration with OpenAPI schema generation
+
+```python
+from sandbox.task_types import TaskResult
+
+# Example usage with automatic validation
+result = TaskResult(
+    task_id="abc123",
+    status_code=0,
+    stdout="Hello World",
+    benchmark_mean_time_ms=42.5,
+    torch_compile_speedup=1.5,
+    gpu_mem_used_gb=2.3  # Automatically validated to be >= 0
+)
+
+print(result.is_successful)  # True
+print(result.get_summary())  # Task abc123...: ✅ SUCCESS | ⏱️ 42.50ms | 🚀 1.50x speedup | 🖥️ 2.3GB GPU
+
+# Pydantic validation in action
+json_data = result.model_dump_json()  # Native JSON serialization
+restored = TaskResult.model_validate_json(json_data)  # Native validation
+```
+
+### System Architecture
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
@@ -276,14 +388,12 @@ python server.py
          ▲                       ▲                       ▲
          │                       │                       │
     HTTP Clients           Task Queue              Code Execution
+         │                       │                       │
+    ┌─────────────┐    ┌─────────────────┐    ┌─────────────────┐
+    │ TaskResult  │    │ Status Monitor  │    │ Resource Monitor│
+    │ Objects     │    │ & Logging       │    │ & Benchmarking  │
+    └─────────────┘    └─────────────────┘    └─────────────────┘
 ```
-
-### Components
-
-- **server.py**: Main FastAPI application with request handling
-- **worker.py**: Worker process implementation for isolated code execution
-- **WorkerPool**: Manages worker lifecycle with automatic recovery
-- **client.py**: Reference client implementation with examples
 
 ### Process Flow
 
@@ -291,8 +401,9 @@ python server.py
 2. **Task Queuing**: Request added to multiprocessing queue
 3. **Worker Assignment**: Available worker picks up task
 4. **GPU Execution**: Code executed on assigned GPU with monitoring
-5. **Result Collection**: Metrics and output collected and returned
-6. **Cleanup**: Temporary files cleaned, resources released
+5. **Result Collection**: Metrics and output collected in TaskResult object
+6. **Result Processing**: Structured result with rich summaries
+7. **Cleanup**: Temporary files cleaned, resources released
 
 ## Performance Considerations
 
@@ -311,6 +422,14 @@ python server.py
 | 8GB        | 1                  | 2-4                |
 | 16GB       | 2                  | 4-8                |
 | 24GB+      | 3-4                | 8-16               |
+
+### Monitoring Benefits
+
+With the new structured monitoring:
+- ✅ **Clean Status Tables**: Regular system health overview
+- ✅ **Rich Task Summaries**: Key metrics with emojis (⏱️ 🚀 🖥️)
+- ✅ **Real-time Metrics**: `/status` endpoint for programmatic monitoring
+- ✅ **Configurable Verbosity**: Control noise with `WORKER_VERBOSE`
 
 ## Troubleshooting
 
@@ -348,13 +467,28 @@ client.reset_workers()
 - Check server logs for detailed error information
 - Reduce `CONCURRENCY_PER_GPU` if instability occurs
 
+**Import errors (circular imports):**
+- The `task_types.py` file avoids conflicts with Python's built-in `types` module
+- Use proper imports: `from sandbox.task_types import TaskResult`
+
 ### Debug Mode
 
 ```bash
 # Enable detailed logging
 export PYTHONPATH=/app
 export LOG_LEVEL=DEBUG
+export WORKER_VERBOSE=true
 python server.py
+```
+
+### Status Monitoring
+
+```bash
+# Check server status
+curl http://localhost:9347/status
+
+# Monitor server logs for status tables (every 30s by default)
+# Set STATUS_LOG_INTERVAL=10 for more frequent updates
 ```
 
 ## Examples
