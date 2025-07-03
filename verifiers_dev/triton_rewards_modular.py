@@ -1,6 +1,7 @@
 import re
 import math
-import asyncio
+import time
+import random
 import httpx
 import os
 from torch._C import NoneType
@@ -20,10 +21,111 @@ from triton_eval.kernel_checks import is_valid_kernel
 
 
 # Server configuration
-SERVER_URL = os.environ.get("TRITON_SERVER_URL", "http://127.0.0.1:9347")
-RUN_TRITON_ENDPOINT = f"/run_triton"
-BENCHMARK = True
-BENCHMARK_RUNS = 10
+TRITON_SERVER_URL = "http://127.0.0.1:9347"
+TRITON_RUN_ENDPOINT = f"/run_triton"
+TRITON_BENCHMARK = True
+TRITON_BENCHMARK_RUNS = 10
+
+
+class TritonClient:
+    """HTTP client for the Triton execution server with error handling and retry logic."""
+    
+    def __init__(self, server_url: str = TRITON_SERVER_URL, run_triton_endpoint: str = TRITON_RUN_ENDPOINT):
+        self.server_url = server_url
+        self.run_triton_endpoint = run_triton_endpoint
+        self.client: httpx.Client = self._create_client()
+    
+    def _create_client(self) -> httpx.Client:
+        """Create a new HTTP client with proper configuration."""
+        timeout_config = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+        limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+        return httpx.Client(timeout=timeout_config, limits=limits)
+    
+    def run_code(self, code: str, tests: str, benchmark: bool = TRITON_BENCHMARK, benchmark_runs: int = TRITON_BENCHMARK_RUNS) -> Dict[str, Any]:
+        """Execute code on the Triton server with retry logic and error handling."""
+        
+        triton_endpoint = f"{self.server_url}{self.run_triton_endpoint}"
+        
+        # Default error response
+        error_response = {
+            "triton_status_code": -1,
+            "triton_stdout": "",
+            "triton_stderr": "Connection failed",
+            "triton_gpu_mem_used_gb": None,
+            "triton_cpu_percent": None,
+            "triton_ram_percent": None,
+            "triton_benchmark_mean_time_ms": None,
+            "triton_benchmark_std_time_ms": None,
+            "triton_benchmark_memory_peak_mb": None,
+            "triton_benchmark_successful_runs": 0,
+        }
+        
+        # Use the initialized client
+        
+        # Retry logic with exponential backoff
+        max_retries = 3
+        base_delay = 1.0
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                resp = self.client.post(triton_endpoint,
+                                      json={
+                                          "code": code, 
+                                          "tests": tests,
+                                          "benchmark": benchmark,
+                                          "benchmark_runs": benchmark_runs
+                                      })
+                resp.raise_for_status()
+                data = resp.json()
+                
+                # Convert to triton_-prefixed format
+                result = {}
+                for key, value in data.items():
+                    result[f"triton_{key}"] = value
+                return result
+                
+            except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+                last_error = e
+                if attempt == max_retries - 1:  # Last attempt
+                    error_response["triton_stderr"] = f"Connection failed after {max_retries} attempts: {last_error}"
+                    return error_response
+                
+                # Exponential backoff with jitter
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"Connection failed (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s: {e}")
+                time.sleep(delay)
+                
+            except httpx.HTTPStatusError as e:
+                # HTTP error (4xx, 5xx) - don't retry, return error info
+                error_response["triton_stderr"] = f"HTTP {e.response.status_code}: {e.response.text}"
+                return error_response
+                
+            except Exception as e:
+                # Other unexpected errors - don't retry
+                error_response["triton_stderr"] = f"Unexpected error: {e}"
+                return error_response
+        
+        # This should never be reached due to the exception handling above
+        error_response["triton_stderr"] = "Unexpected code path reached"
+        return error_response
+    
+    def close(self):
+        """Close the HTTP client."""
+        if hasattr(self, 'client') and self.client is not None:
+            self.client.close()
+    
+    def __del__(self):
+        """Cleanup on destruction."""
+        self.close()
+
+
+# Module-level client instance
+triton_client = TritonClient()
+
+# Register cleanup function
+import atexit
+atexit.register(triton_client.close)
 
 # Valid triton.language methods
 VALID_TL_METHODS = set([
@@ -231,34 +333,23 @@ def create_static_rubric(parser: XMLParser) -> Rubric:
         ],
         parser=parser
     )
-@weave.op
-def call_triton_server(code, tests, client, url=SERVER_URL, benchmark=BENCHMARK) -> Dict[str, Any]:
-    triton_endpoint = f"{url}{RUN_TRITON_ENDPOINT}"
-    resp = client.post(triton_endpoint,
-                      json={
-                          "code": code, 
-                          "tests": tests,
-                          "benchmark": benchmark,
-                          "benchmark_runs": BENCHMARK_RUNS
-                      },
-                      timeout=300.0)
-    resp.raise_for_status()
-    data = resp.json()
-    
-    # Convert to triton_-prefixed format
-    result = {}
-    for key, value in data.items():
-        result[f"triton_{key}"] = value
-    return result
 
 # Async API rubric for expensive Triton server calls
 class TritonAPIRubric(Rubric):
     """Rubric that makes async calls to Triton server for execution scoring."""
     
-    def __init__(self, parser: XMLParser, triton_server_url: str, **kwargs):
+    def __init__(
+        self, 
+        parser: XMLParser, 
+        triton_client: TritonClient, 
+        triton_benchmark: bool=TRITON_BENCHMARK,
+        triton_benchmark_runs: int=TRITON_BENCHMARK_RUNS,
+        **kwargs):
         super().__init__(parser=parser, **kwargs)
         self.add_reward_func(self.triton_execution_reward)
-        self.triton_server_url = triton_server_url
+        self.triton_client = triton_client
+        self.triton_benchmark = triton_benchmark
+        self.triton_benchmark_runs = triton_benchmark_runs
     
     @weave.op
     def triton_execution_reward(self, completion, answer=None, info=None, **kwargs) -> float:
@@ -292,13 +383,13 @@ class TritonAPIRubric(Rubric):
                 return -0.2
         
         # Execute code on server synchronously
-        with httpx.Client() as client:
-            try:
-                result = call_triton_server(code, tests, client, self.triton_server_url)
-            except Exception as e:
-                # Server error raise warning
-                print(f">> Triton Triton Server error, failed computing rewards at {self.triton_server_url}: \n{e}")
-                return -0.2
+        result = self.triton_client.run_code(code, tests, benchmark=self.triton_benchmark, benchmark_runs=self.triton_benchmark_runs)
+        
+        # Check if there was an error
+        if result.get("triton_status_code", -1) != 0:
+            error_msg = result.get("triton_stderr", "Unknown error")
+            print(f"Triton Server Error: \n{error_msg}")
+            return -0.2
         
         # Check execution results
         runs = result.get("triton_status_code", -1) == 0
@@ -349,12 +440,18 @@ class TritonAPIRubric(Rubric):
         
         return base_reward + performance_reward + memory_reward
 
-def get_triton_env(train_dataset, triton_server_url, eval_dataset=None) -> SingleTurnEnv:
-    if triton_server_url is None:
-        triton_server_url = SERVER_URL
+def get_triton_env(
+    train_dataset, 
+    eval_dataset=None,
+    triton_server_url: str=TRITON_SERVER_URL,
+    triton_run_endpoint: str=TRITON_RUN_ENDPOINT,
+    triton_benchmark: bool=TRITON_BENCHMARK,
+    triton_benchmark_runs: int=TRITON_BENCHMARK_RUNS,
+    ) -> SingleTurnEnv:
+    triton_client = TritonClient(server_url=triton_server_url, run_triton_endpoint=triton_run_endpoint)
     parser = XMLParser(['think', 'triton'], answer_field='triton')
     static_rubric = create_static_rubric(parser)
-    api_rubric = TritonAPIRubric(parser, triton_server_url)
+    api_rubric = TritonAPIRubric(parser, triton_client, triton_benchmark=triton_benchmark, triton_benchmark_runs=triton_benchmark_runs)
     group = RubricGroup(rubrics=[api_rubric, static_rubric])
     return SingleTurnEnv(dataset=train_dataset, rubric=group, eval_dataset=eval_dataset)
 
@@ -374,10 +471,10 @@ def remove_thinking_block(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 class MutiTurnTritonEnv(Environment):
-    def __init__(self, max_turns: int = 10, triton_server_url: str = SERVER_URL, **kwargs):
+    def __init__(self, triton_client: TritonClient, max_turns: int = 10, **kwargs):
         super().__init__(**kwargs)
         self.max_turns = max_turns
-        self.triton_server_url = triton_server_url
+        self.triton_client = triton_client
     
     @weave.op
     def run_code(self, messages: List[Dict[str, Any]], info: Dict[str, Any]) -> Dict[str, Any]:
@@ -393,13 +490,13 @@ class MutiTurnTritonEnv(Environment):
         entrypoint = info.get("entrypoint", "")
 
         # Execute code on server synchronously
-        with httpx.Client() as client:
-            try:
-                result = call_triton_server(code, tests, client, self.triton_server_url, benchmark=False)
-            except Exception as triton_server_error:
-                # Server error raise warning
-                print(f"Triton Server Error: \n{triton_server_error}")
-                return {"runs": False, "error": str(triton_server_error), "comparison": None}
+        result = self.triton_client.run_code(code, tests, benchmark=False)
+        
+        # Check if there was an error
+        if result.get("triton_status_code", -1) != 0:
+            error_msg = result.get("triton_stderr", "Unknown error")
+            print(f"Triton Server Error: \n{error_msg}")
+            return {"runs": False, "error": error_msg, "comparison": None}
         
         # Check execution results
         runs = result.get("triton_status_code", -1) == 0
@@ -520,14 +617,24 @@ class MutiTurnTritonEnv(Environment):
         return completion, state
 
 
-def get_multi_turn_env(train_dataset, triton_server_url, max_turns=3, eval_dataset=None) -> MutiTurnTritonEnv:
+def get_multi_turn_env(
+    train_dataset, 
+    eval_dataset=None,
+    triton_server_url: str=TRITON_SERVER_URL,
+    triton_run_endpoint: str=TRITON_RUN_ENDPOINT,
+    triton_benchmark: bool=TRITON_BENCHMARK,
+    triton_benchmark_runs: int=TRITON_BENCHMARK_RUNS,
+    max_turns: int=3
+    ) -> MutiTurnTritonEnv:
+    """Create a multi-turn Triton environment."""
+    triton_client = TritonClient(server_url=triton_server_url, run_triton_endpoint=triton_run_endpoint)
     parser = XMLParser(['think', 'triton'], answer_field='triton')
     static_rubric = create_static_rubric(parser)
-    api_rubric = TritonAPIRubric(parser, triton_server_url)
+    api_rubric = TritonAPIRubric(parser, triton_client, triton_benchmark=triton_benchmark, triton_benchmark_runs=triton_benchmark_runs)
     group = RubricGroup(rubrics=[api_rubric, static_rubric])
     return MutiTurnTritonEnv(
         dataset=train_dataset, 
-        triton_server_url=triton_server_url, 
+        triton_client=triton_client, 
         max_turns=max_turns,
         rubric=group, 
         eval_dataset=eval_dataset)
