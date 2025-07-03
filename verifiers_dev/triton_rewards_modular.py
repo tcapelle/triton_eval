@@ -388,7 +388,6 @@ class TritonAPIRubric(Rubric):
         # Check if there was an error
         if result.get("triton_status_code", -1) != 0:
             error_msg = result.get("triton_stderr", "Unknown error")
-            print(f"Triton Server Error: \n{error_msg}")
             return -0.2
         
         # Check execution results
@@ -495,7 +494,6 @@ class MutiTurnTritonEnv(Environment):
         # Check if there was an error
         if result.get("triton_status_code", -1) != 0:
             error_msg = result.get("triton_stderr", "Unknown error")
-            print(f"Triton Server Error: \n{error_msg}")
             return {"runs": False, "error": error_msg, "comparison": None}
         
         # Check execution results
