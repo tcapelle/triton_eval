@@ -8,9 +8,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from rich.console import Console
 from rich.rule import Rule
+from rich.table import Table
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
+
+# Import TaskResult from task_types module
+try:
+    from .task_types import TaskResult  # Relative import for module usage
+except ImportError:
+    from task_types import TaskResult  # Absolute import for direct execution
 
 # --- Rich Console Initialization ---
 console = Console()
@@ -32,6 +39,8 @@ CONCURRENCY_PER_GPU = int(os.getenv("CONCURRENCY_PER_GPU", 1))
 WORKER_COUNT = NUM_GPUS * CONCURRENCY_PER_GPU
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", 30)) # Timeout for each task execution in seconds (e.g., 2 minutes)
 WORKER_JOIN_TIMEOUT = int(os.getenv("WORKER_JOIN_TIMEOUT", 20)) # Seconds to wait for worker processes to join gracefully
+STATUS_LOG_INTERVAL = int(os.getenv("STATUS_LOG_INTERVAL", 30)) # Seconds between status logs
+WORKER_VERBOSE = os.getenv("WORKER_VERBOSE", "false").lower() in ("true", "1", "yes", "on")  # Enable verbose worker logging
 
 # Queues and shared state
 task_queue = multiprocessing.Queue()
@@ -40,6 +49,15 @@ in_flight_requests = {}
 workers: List[multiprocessing.Process] = []  # Populated/kept in-sync by WorkerPool for BC
 # A single lock lives inside WorkerPool; expose it here for the very few legacy usages.
 workers_lock: asyncio.Lock  # Forward declaration – real value assigned after WorkerPool is built.
+
+# Statistics tracking
+server_stats = {
+    "total_requests": 0,
+    "successful_requests": 0,
+    "failed_requests": 0,
+    "timeout_requests": 0,
+    "start_time": None,
+}
 # --- End Configuration ---
 
 # Pydantic request/response models
@@ -75,12 +93,51 @@ class CodeExecutionResponse(BaseModel):
     torch_compile_benchmark_mean_time_ms: Optional[float] = None
     torch_compile_benchmark_std_time_ms: Optional[float] = None
     torch_compile_speedup: Optional[float] = None  # Speedup ratio of compiled vs regular
+    
+    @classmethod
+    def from_task_result(cls, task_result: TaskResult) -> 'CodeExecutionResponse':
+        """Create CodeExecutionResponse from TaskResult object."""
+        return cls(
+            status_code=task_result.status_code,
+            stdout=task_result.stdout,
+            stderr=task_result.stderr,
+            gpu_mem_used_gb=task_result.gpu_mem_used_gb,
+            cpu_percent=task_result.cpu_percent,
+            ram_percent=task_result.ram_percent,
+            benchmark_mean_time_ms=task_result.benchmark_mean_time_ms,
+            benchmark_std_time_ms=task_result.benchmark_std_time_ms,
+            benchmark_memory_peak_mb=task_result.benchmark_memory_peak_mb,
+            benchmark_successful_runs=task_result.benchmark_successful_runs,
+            torch_compile_benchmark_mean_time_ms=task_result.torch_compile_benchmark_mean_time_ms,
+            torch_compile_benchmark_std_time_ms=task_result.torch_compile_benchmark_std_time_ms,
+            torch_compile_speedup=task_result.torch_compile_speedup,
+        )
+
+class ServerStatusResponse(BaseModel):
+    total_workers: int
+    active_workers: int
+    dead_workers: int
+    worker_pool_running: bool
+    pending_requests: int
+    queue_size: Optional[int] = None
+    stats: Dict[str, Any]
+    uptime_seconds: Optional[float] = None
+    gpus_configured: int
+    concurrency_per_gpu: int
 
 # --- Lifespan Context Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
     console.print(Rule("[bold blue]Server Startup (lifespan)[/bold blue]"))
+    
+    # Initialize server stats
+    import time
+    server_stats["start_time"] = time.time()
+    
+    # Show configuration
+    console.print(f"[server] Worker verbosity: {'ON' if WORKER_VERBOSE else 'OFF'} (WORKER_VERBOSE={os.getenv('WORKER_VERBOSE', 'false')})")
+    
     # Start workers automatically
     success = await worker_pool.start()
     if not success:
@@ -90,6 +147,7 @@ async def lifespan(app: FastAPI):
         console.print(f"[server] [green]Initial worker pool started with {worker_pool.active_count} worker(s).[/green]")
 
     collector_task = asyncio.create_task(result_collector())
+    status_task = asyncio.create_task(status_logger())
     console.print("[server] [bold green]Startup complete. Ready for requests.[/bold green]")
 
     yield # Server runs here
@@ -97,13 +155,14 @@ async def lifespan(app: FastAPI):
     # Shutdown logic
     console.print(Rule("[bold blue]Server Shutdown (lifespan)[/bold blue]"))
     await kill_workers_internal()
-    # Optionally cancel the collector task if it hasn't finished
-    if collector_task and not collector_task.done():
-        collector_task.cancel()
-        try:
-            await collector_task # Wait for cancellation to complete
-        except asyncio.CancelledError:
-            console.print("[server] Result collector task cancelled successfully.")
+    # Cancel background tasks
+    for task in [collector_task, status_task]:
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     console.print("[server] [bold green]Shutdown complete.[/bold green]")
 
 app = FastAPI(lifespan=lifespan)
@@ -250,8 +309,6 @@ class WorkerPool:
             for _ in self._workers:
                 try:
                     self.task_queue.put_nowait(None)  # Updated poison pill format
-                except multiprocessing.queues.Full:
-                    console.print("[pool] [yellow]Task queue full while sending poison pills.[/yellow]")
                 except Exception as exc:
                     console.print(f"[pool] [red]Error sending poison pill:[/red] {exc}")
 
@@ -367,26 +424,104 @@ async def result_collector():
     console.print("[server] [italic]Result collector task started.[/italic]")
     while True:
         try:
-            result = await asyncio.to_thread(result_queue.get)
-            task_id = result.get("task_id")
-            if task_id in in_flight_requests:
-                fut = in_flight_requests.pop(task_id)
+            result_dict = await asyncio.to_thread(result_queue.get)
+            result = TaskResult.model_validate(result_dict)
+            
+            if result.task_id in in_flight_requests:
+                fut = in_flight_requests.pop(result.task_id)
                 if not fut.done(): # Avoid setting result on already cancelled future
                     fut.set_result(result)
             # else: # No need to log warning if futures might be cancelled by stop_workers
-                # console.print(f"[server] [yellow]Warning:[/yellow] Received result for unknown/old/cancelled task_id: {task_id}")
+                # console.print(f"[server] [yellow]Warning:[/yellow] Received result for unknown/old/cancelled task_id: {result.task_id}")
         except Exception as e:
             console.print(f"[server] [bold red]Error in result collector:[/bold red] {e}")
             await asyncio.sleep(1)
+
+async def status_logger():
+    """Background task to log server status periodically."""
+    console.print("[server] [italic]Status logger task started.[/italic]")
+    while True:
+        try:
+            await asyncio.sleep(STATUS_LOG_INTERVAL)
+            
+            # Get current status
+            active_workers = worker_pool.active_count
+            total_workers = len(worker_pool._workers)
+            dead_workers = total_workers - active_workers
+            pending_requests = len(in_flight_requests)
+            
+            try:
+                queue_size = task_queue.qsize()
+            except (NotImplementedError, AttributeError):
+                queue_size = "N/A"
+            
+            # Calculate uptime
+            import time
+            uptime = time.time() - server_stats["start_time"] if server_stats["start_time"] else 0
+            
+            # Create status table
+            table = Table(title="Server Status", show_header=True, header_style="bold magenta")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", style="green")
+            
+            table.add_row("Workers (Active/Total)", f"{active_workers}/{total_workers}")
+            table.add_row("Dead Workers", str(dead_workers))
+            table.add_row("Pending Requests", str(pending_requests))
+            table.add_row("Queue Size", str(queue_size))
+            table.add_row("Total Requests", str(server_stats["total_requests"]))
+            table.add_row("Successful", str(server_stats["successful_requests"]))
+            table.add_row("Failed", str(server_stats["failed_requests"]))
+            table.add_row("Timeouts", str(server_stats["timeout_requests"]))
+            table.add_row("Uptime", f"{uptime:.1f}s")
+            table.add_row("GPUs", str(NUM_GPUS))
+            table.add_row("Concurrency/GPU", str(CONCURRENCY_PER_GPU))
+            
+            console.print(table)
+            
+        except Exception as e:
+            console.print(f"[server] [bold red]Error in status logger:[/bold red] {e}")
+            await asyncio.sleep(5)  # Wait a bit before retrying
 
 @app.get("/")
 def read_root():
     return {"message": "Triton Worker Pool Server is ready!"}
 
+@app.get("/status", response_model=ServerStatusResponse)
+async def get_status():
+    """Get current server status."""
+    active_workers = worker_pool.active_count
+    total_workers = len(worker_pool._workers)
+    dead_workers = total_workers - active_workers
+    pending_requests = len(in_flight_requests)
+    
+    try:
+        queue_size = task_queue.qsize()
+    except (NotImplementedError, AttributeError):
+        queue_size = None
+    
+    # Calculate uptime
+    import time
+    uptime = time.time() - server_stats["start_time"] if server_stats["start_time"] else None
+    
+    return ServerStatusResponse(
+        total_workers=total_workers,
+        active_workers=active_workers,
+        dead_workers=dead_workers,
+        worker_pool_running=worker_pool.is_running,
+        pending_requests=pending_requests,
+        queue_size=queue_size,
+        stats=server_stats,
+        uptime_seconds=uptime,
+        gpus_configured=NUM_GPUS,
+        concurrency_per_gpu=CONCURRENCY_PER_GPU
+    )
 
 @app.post("/run_triton", response_model=CodeExecutionResponse)
 async def run_triton_endpoint(request: TritonExecutionRequest):
     """API endpoint to execute Triton code."""
+    # Track request
+    server_stats["total_requests"] += 1
+    
     # Workers should now always be running unless startup failed or they crashed.
     # Keep the check to handle edge cases like crashes or failed resets.
     if not worker_pool.is_running:
@@ -395,6 +530,7 @@ async def run_triton_endpoint(request: TritonExecutionRequest):
         started = await worker_pool.start()
         if not started:
             console.print("[server] [bold red]Automatic worker pool restart failed.[/bold red]")
+            server_stats["failed_requests"] += 1
             raise HTTPException(
                 status_code=503,
                 detail="Workers are not currently operational and automatic restart failed.",
@@ -428,71 +564,55 @@ async def run_triton_endpoint(request: TritonExecutionRequest):
     # Acquire lock briefly only to add the future, reducing contention
     async with workers_lock:
         if not worker_pool.is_running:  # Re-check in case they were stopped before we acquired the lock
+            server_stats["failed_requests"] += 1
             raise HTTPException(
                 status_code=503,
                 detail="Workers were stopped before the request could be processed.",
             )
         in_flight_requests[task_id] = fut  # Add future only if pool is confirmed running
 
-    console.print(f"[server] Received request, assigning Task ID: {task_id}")
+    # Reduce verbosity - only log when queue is getting full or for benchmarking
+    should_log = request.benchmark or len(in_flight_requests) > WORKER_COUNT * 2
+    if should_log:
+        console.print(f"[server] Triton task {task_id[:8]}... queued (pending: {len(in_flight_requests)})")
+    
     try:
         # Offload the potentially blocking put operation to a thread so the event loop remains responsive.
         await asyncio.to_thread(task_queue.put, task_data)
-        # qsize() may not be implemented on some platforms; fall back gracefully.
-        try:
-            q_sz = task_queue.qsize()
-        except (NotImplementedError, AttributeError):
-            q_sz = "unknown"
-        console.print(f"[server] Task {task_id} added to queue (queue size: {q_sz}).")
     except Exception as e:
         in_flight_requests.pop(task_id, None) # Clean up future
-        console.print(f"[server] Task {task_id} [bold red]rejected[/bold red]: Error adding to queue: {e}")
+        console.print(f"[server] Task {task_id[:8]}... [bold red]rejected[/bold red]: Error adding to queue: {e}")
+        server_stats["failed_requests"] += 1
         raise HTTPException(status_code=500, detail="Internal server error queuing task.")
 
     try:
-        console.print(f"[server] Waiting for task {task_id} (timeout: [yellow]{TASK_TIMEOUT_SECONDS}s[/yellow])...")
         result = await asyncio.wait_for(fut, timeout=TASK_TIMEOUT_SECONDS)
-        console.print(f"[server] Task {task_id} [green]completed[/green].")
-        return CodeExecutionResponse(
-            status_code=result["status_code"],
-            stdout=result["stdout"],
-            stderr=result["stderr"],
-            # Extract metrics from result dict
-            gpu_mem_used_gb=result.get("gpu_mem_used_gb"),
-            cpu_percent=result.get("cpu_percent"),
-            ram_percent=result.get("ram_percent"),
-            # Extract benchmark metrics
-            benchmark_mean_time_ms=result.get("benchmark_mean_time_ms"),
-            benchmark_std_time_ms=result.get("benchmark_std_time_ms"),
-            benchmark_memory_peak_mb=result.get("benchmark_memory_peak_mb"),
-            benchmark_successful_runs=result.get("benchmark_successful_runs"),
-        )
+        server_stats["successful_requests"] += 1
+        if should_log:
+            console.print(f"[server] {result.get_summary()}")
+        return CodeExecutionResponse.from_task_result(result)
     except asyncio.TimeoutError:
-        console.print(f"[server] Task {task_id} [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS} seconds.")
-        console.print(f"[server] [yellow]Hint:[/yellow] This might happen if the task took too long, or if the assigned worker process terminated unexpectedly.")
-
-        # The dedicated monitor inside WorkerPool will take care of replacing dead workers.
-        # We just log the timeout here – no manual intervention needed anymore.
-
-        # Note: Future might have already been removed if stop_workers cancelled it
+        server_stats["timeout_requests"] += 1
+        console.print(f"[server] Triton task {task_id[:8]}... [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS}s")
         in_flight_requests.pop(task_id, None) # Clean up future for timed-out task
         raise HTTPException(status_code=504, detail=f"Task execution timed out after {TASK_TIMEOUT_SECONDS} seconds.")
     except asyncio.CancelledError:
-         # Future is already removed/cancelled by kill_workers_internal
-         # Log cancellation without raising HTTPException immediately, as it might be part of a controlled stop/reset
-         console.print(f"[server] Task {task_id} [yellow]cancelled[/yellow], likely due to worker shutdown or reset.")
-         # Ensure the future is removed from in_flight_requests
+         console.print(f"[server] Triton task {task_id[:8]}... [yellow]cancelled[/yellow]")
          in_flight_requests.pop(task_id, None)
-         # Raise the HTTPException to inform the client
+         server_stats["failed_requests"] += 1
          raise HTTPException(status_code=503, detail="Task cancelled, workers may have been stopped or reset.")
     except Exception as e:
-         console.print(f"[server] [bold red]Error processing result[/bold red] for task {task_id}: {e}")
+         console.print(f"[server] [bold red]Error processing result[/bold red] for task {task_id[:8]}...: {e}")
          in_flight_requests.pop(task_id, None)
+         server_stats["failed_requests"] += 1
          raise HTTPException(status_code=500, detail="Internal server error processing task result.")
 
 @app.post("/run_pytorch", response_model=CodeExecutionResponse)
 async def run_pytorch_endpoint(request: PyTorchExecutionRequest):
     """API endpoint to execute PyTorch code with optional torch.compile benchmarking."""
+    # Track request
+    server_stats["total_requests"] += 1
+    
     # Workers should now always be running unless startup failed or they crashed.
     # Keep the check to handle edge cases like crashes or failed resets.
     if not worker_pool.is_running:
@@ -501,6 +621,7 @@ async def run_pytorch_endpoint(request: PyTorchExecutionRequest):
         started = await worker_pool.start()
         if not started:
             console.print("[server] [bold red]Automatic worker pool restart failed.[/bold red]")
+            server_stats["failed_requests"] += 1
             raise HTTPException(
                 status_code=503,
                 detail="Workers are not currently operational and automatic restart failed.",
@@ -539,70 +660,47 @@ async def run_pytorch_endpoint(request: PyTorchExecutionRequest):
     # Acquire lock briefly only to add the future, reducing contention
     async with workers_lock:
         if not worker_pool.is_running:  # Re-check in case they were stopped before we acquired the lock
+            server_stats["failed_requests"] += 1
             raise HTTPException(
                 status_code=503,
                 detail="Workers were stopped before the request could be processed.",
             )
         in_flight_requests[task_id] = fut  # Add future only if pool is confirmed running
 
-    console.print(f"[server] Received PyTorch request, assigning Task ID: {task_id}")
+    # Reduce verbosity - only log when queue is getting full or for benchmarking
+    should_log = request.benchmark or request.torch_compile or len(in_flight_requests) > WORKER_COUNT * 2
+    if should_log:
+        console.print(f"[server] PyTorch task {task_id[:8]}... queued (pending: {len(in_flight_requests)})")
+    
     try:
         # Offload the potentially blocking put operation to a thread so the event loop remains responsive.
         await asyncio.to_thread(task_queue.put, task_data)
-        # qsize() may not be implemented on some platforms; fall back gracefully.
-        try:
-            q_sz = task_queue.qsize()
-        except (NotImplementedError, AttributeError):
-            q_sz = "unknown"
-        console.print(f"[server] Task {task_id} added to queue (queue size: {q_sz}).")
     except Exception as e:
         in_flight_requests.pop(task_id, None) # Clean up future
-        console.print(f"[server] Task {task_id} [bold red]rejected[/bold red]: Error adding to queue: {e}")
+        console.print(f"[server] Task {task_id[:8]}... [bold red]rejected[/bold red]: Error adding to queue: {e}")
+        server_stats["failed_requests"] += 1
         raise HTTPException(status_code=500, detail="Internal server error queuing task.")
 
     try:
-        console.print(f"[server] Waiting for PyTorch task {task_id} (timeout: [yellow]{TASK_TIMEOUT_SECONDS}s[/yellow])...")
         result = await asyncio.wait_for(fut, timeout=TASK_TIMEOUT_SECONDS)
-        console.print(f"[server] PyTorch task {task_id} [green]completed[/green].")
-        return CodeExecutionResponse(
-            status_code=result["status_code"],
-            stdout=result["stdout"],
-            stderr=result["stderr"],
-            # Extract metrics from result dict
-            gpu_mem_used_gb=result.get("gpu_mem_used_gb"),
-            cpu_percent=result.get("cpu_percent"),
-            ram_percent=result.get("ram_percent"),
-            # Extract benchmark metrics
-            benchmark_mean_time_ms=result.get("benchmark_mean_time_ms"),
-            benchmark_std_time_ms=result.get("benchmark_std_time_ms"),
-            benchmark_memory_peak_mb=result.get("benchmark_memory_peak_mb"),
-            benchmark_successful_runs=result.get("benchmark_successful_runs"),
-            # Extract PyTorch-specific metrics
-            torch_compile_benchmark_mean_time_ms=result.get("torch_compile_benchmark_mean_time_ms"),
-            torch_compile_benchmark_std_time_ms=result.get("torch_compile_benchmark_std_time_ms"),
-            torch_compile_speedup=result.get("torch_compile_speedup"),
-        )
+        server_stats["successful_requests"] += 1
+        if should_log:
+            console.print(f"[server] {result.get_summary()}")
+        return CodeExecutionResponse.from_task_result(result)
     except asyncio.TimeoutError:
-        console.print(f"[server] PyTorch task {task_id} [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS} seconds.")
-        console.print(f"[server] [yellow]Hint:[/yellow] This might happen if the task took too long, or if the assigned worker process terminated unexpectedly.")
-
-        # The dedicated monitor inside WorkerPool will take care of replacing dead workers.
-        # We just log the timeout here – no manual intervention needed anymore.
-
-        # Note: Future might have already been removed if stop_workers cancelled it
+        server_stats["timeout_requests"] += 1
+        console.print(f"[server] PyTorch task {task_id[:8]}... [bold red]timed out[/bold red] after {TASK_TIMEOUT_SECONDS}s")
         in_flight_requests.pop(task_id, None) # Clean up future for timed-out task
         raise HTTPException(status_code=504, detail=f"Task execution timed out after {TASK_TIMEOUT_SECONDS} seconds.")
     except asyncio.CancelledError:
-         # Future is already removed/cancelled by kill_workers_internal
-         # Log cancellation without raising HTTPException immediately, as it might be part of a controlled stop/reset
-         console.print(f"[server] PyTorch task {task_id} [yellow]cancelled[/yellow], likely due to worker shutdown or reset.")
-         # Ensure the future is removed from in_flight_requests
+         console.print(f"[server] PyTorch task {task_id[:8]}... [yellow]cancelled[/yellow]")
          in_flight_requests.pop(task_id, None)
-         # Raise the HTTPException to inform the client
+         server_stats["failed_requests"] += 1
          raise HTTPException(status_code=503, detail="Task cancelled, workers may have been stopped or reset.")
     except Exception as e:
-         console.print(f"[server] [bold red]Error processing result[/bold red] for PyTorch task {task_id}: {e}")
+         console.print(f"[server] [bold red]Error processing result[/bold red] for PyTorch task {task_id[:8]}...: {e}")
          in_flight_requests.pop(task_id, None)
+         server_stats["failed_requests"] += 1
          raise HTTPException(status_code=500, detail="Internal server error processing task result.")
 
 # --- API Endpoints ---
