@@ -518,7 +518,8 @@ class MutiTurnTritonEnv(Environment):
                      **kwargs: Any) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """TODO: Explore tool use here"""
         
-        fail_prompt = dedent("""The code you wrote doesn't run. The error when running the code is: 
+        fail_prompt = dedent("""\
+        The code you wrote doesn't run. The error when running the code is: 
         
         <error_message>
         {error}
@@ -528,7 +529,8 @@ class MutiTurnTritonEnv(Environment):
         
         triton_prompt = dedent("""The exeuction server errored out, try re-running the code again.""")
 
-        incorrect_prompt = dedent("""The code runs but it is not correct. You are failing the tests:
+        incorrect_prompt = dedent("""\
+        The code runs but it is not correct. You are failing the tests:
         <tests>
         {tests}
         </tests>
