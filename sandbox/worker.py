@@ -628,12 +628,14 @@ def worker_main(task_queue, result_queue, gpu_id):
 
             if is_fatal_error(e):
                 # Log as fatal error leading to exit
-                print(f"[Worker PID {os.getpid()}] Task {task_id} FATAL error detected:\\n{tb}", file=original_stderr_for_logging, flush=True)
+                if WORKER_VERBOSE:
+                    print(f"[Worker PID {os.getpid()}] Task {task_id} FATAL error detected:\\n{tb}", file=original_stderr_for_logging, flush=True)
                 print(f"[Worker PID {os.getpid()}] Exiting due to fatal error in task {task_id}.", file=original_stderr_for_logging, flush=True)
                 should_exit = True # Mark worker for exit
             else:
                 # Log as non-fatal error, worker will continue
-                print(f"[Worker PID {os.getpid()}] Task {task_id} non-fatal execution error:\\n{tb}", file=original_stderr_for_logging, flush=True)
+                if WORKER_VERBOSE:
+                    print(f"[Worker PID {os.getpid()}] Task {task_id} non-fatal execution error:\\n{tb}", file=original_stderr_for_logging, flush=True)
                 print(f"[Worker PID {os.getpid()}] Continuing after non-fatal error in task {task_id}.", file=original_stderr_for_logging, flush=True)
                 # should_exit remains False
 
