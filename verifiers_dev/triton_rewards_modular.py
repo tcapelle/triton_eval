@@ -560,7 +560,7 @@ class MutiTurnTritonEnv(Environment):
         return generic_msg, state
 
     @weave.op
-    def rollout(self,
+    async def rollout(self,
             client: openai.OpenAI,
             model: str,
             prompt: Union[str, List[Dict[str, Any]]],
@@ -582,7 +582,7 @@ class MutiTurnTritonEnv(Environment):
                 messages = remove_thinking_block(messages)
 
             # generate triton code
-            response = self.get_model_response(
+            response = await self.get_model_response(
                 prompt=messages,
                 client=client,
                 model=model,
