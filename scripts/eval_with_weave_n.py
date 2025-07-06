@@ -41,8 +41,9 @@ class ScriptArgs:
     num_generations: int = 1
     temperature: float = TEMPERATURE
     max_tokens: int = 12_000
-    weave_project: str = "grpo-cuda/dataset-rollout"
+    weave_project: str = "grpo-cuda/triton-bench"
     dataset_name: str = "tcapelle/boostrap_oai_pt_think"
+    weave_dataset: str = "Tritonbench_T_v2:latest"
     debug: bool = False
     code_token: str = sp.field(default="triton", alias="-ct")
     reasoning_token: str = sp.field(default="think", alias="-rt")
@@ -58,7 +59,19 @@ client = openai.OpenAI(
 )
 weave.init(args.weave_project)
 
-ds = load_dataset(args.dataset_name, split="train").to_list()
+
+def prefix_with_pt(row):
+    cols_to_prefix = ['entrypoint', 'tests', 'stdout', 'stderr', 'runs']
+    for col in cols_to_prefix:
+        if col in row:
+            row[f"pt_{col}"] = row[col]
+    return row
+
+if args.weave_dataset:
+    ds = weave.ref(args.weave_dataset).get()
+    ds = [prefix_with_pt(row) for row in ds]
+else:   
+    ds = load_dataset(args.dataset_name, split="train").to_list()
 if args.debug:
     ds = ds[:3]
 
@@ -165,11 +178,13 @@ def score_one(output, tests, pt_stdout, pt_runs, pt_entrypoint):
 def aggregate_results(results):
     return {
         "is_valid": sum([1 for result in results if result["is_valid"]]),
-        "triton_runs": sum([1 for result in results if result["triton_runs"]]),
+        "n_runs":  sum([1 for result in results if result["triton_runs"]]),
+        "triton_runs": any([result["triton_runs"] for result in results]),
         "triton_stdout": sum([1 for result in results if result["triton_stdout"]]),
         "triton_stderr": sum([1 for result in results if result["triton_stderr"]]),
-        "is_correct": sum([1 for result in results if result["is_correct"]]),
+        "n_correct": sum([1 for result in results if result["is_correct"]]),
         "validity": sum([1 for result in results if result["validity"]]),
+        "is_correct": any([result["is_correct"] for result in results]),
     }
 
 @weave.op
