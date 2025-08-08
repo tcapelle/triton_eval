@@ -2,10 +2,9 @@ import datasets
 import transformers
 from transformers import set_seed, AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
-from verifiers.envs import SingleTurnEnv
 from verifiers.trainers import GRPOTrainer, grpo_defaults, GRPOConfig
-from verifiers.parsers import XMLParser
-from verifiers.rubrics import Rubric
+from verifiers.parsers.xml_parser import XMLParser
+from verifiers.rubrics.rubric import Rubric
 from verifiers.utils.model_utils import get_model_and_tokenizer
 from trl import ModelConfig, TrlParser
 
@@ -15,13 +14,15 @@ import weave
 import torch.distributed as dist
 
 from config import GRPOScriptArgs
-from triton_rewards_modular import get_triton_env, get_multi_turn_env
+from triton_rewards_modular import load_environment, load_multi_turn_environment
+
 
 def is_main_process():
     if dist.is_initialized():
         return dist.get_rank() == 0
     else:
         return True
+
 
 def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: ModelConfig):
     set_seed(training_args.seed)
@@ -34,7 +35,7 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
         print(f"Model parameters:\n{model_args}\n--------------------------------")
 
         wandb.init(entity=script_args.wandb_entity, project=script_args.wandb_project, name=script_args.wandb_name)
-        weave.init(f"{script_args.wandb_entity}/{script_args.wandb_project}")
+        # weave.init(f"{script_args.wandb_entity}/{script_args.wandb_project}")
 
     # Load model and tokenizer
 
@@ -70,15 +71,20 @@ def train(script_args: GRPOScriptArgs, training_args: GRPOConfig, model_args: Mo
         eval_dataset = eval_dataset.map(map_to_info)
 
     if script_args.max_turns > 1:
-        triton_env = get_multi_turn_env(
-            train_dataset=train_dataset, 
-            triton_server_url=script_args.triton_server_url, 
+        triton_env = load_multi_turn_environment(
+            train_dataset=train_dataset,
+            triton_server_url=script_args.triton_server_url,
             max_turns=script_args.max_turns,
-            eval_dataset=eval_dataset)
+            eval_dataset=eval_dataset,
+        )
     else:
-        triton_env = get_triton_env(train_dataset=train_dataset, triton_server_url=script_args.triton_server_url, eval_dataset=eval_dataset)
+        triton_env = load_environment(
+            train_dataset=train_dataset,
+            triton_server_url=script_args.triton_server_url,
+            eval_dataset=eval_dataset,
+        )
 
-    if is_main_process:
+    if is_main_process():
         print(f"Loading Triton environment with server url {script_args.triton_server_url}")
 
     # Create trainer
