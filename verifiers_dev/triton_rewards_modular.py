@@ -20,9 +20,9 @@ from triton_eval.agents.tools import extract_code
 from triton_eval.kernel_checks import is_valid_kernel
 
 # Import the base RubricGroup
-from verifiers.rubrics.rubric_group import RubricGroup as BaseRubricGroup
+from verifiers.rubrics.rubric_group import RubricGroup
 
-class FixedRubricGroup(BaseRubricGroup):
+class FixedRubricGroup(RubricGroup):
     """Fixed RubricGroup that properly aggregates reward scores."""
     
     async def score_rollouts(
@@ -66,7 +66,7 @@ class FixedRubricGroup(BaseRubricGroup):
                     ]
                 else:
                     all_scores.metrics[key] = value
-                    
+        print(f"    #### all_scores:\n {all_scores}\n==================\n")
         return all_scores
 
 
@@ -313,9 +313,9 @@ def think_reward(completion, answer=None, state=None, task=None, info=None, **kw
         content_length = len(thinking_content[0].strip())
         if content_length >= 100:
             thinking_length = max(content_length - 5000, 0)
-            return 0.1 * math.exp(-0.5*thinking_length/1000)
+            return 0.4 * math.exp(-0.5*thinking_length/1000) - 0.2
     
-    return -0.1
+    return -0.2
 
 
 @weave.op
@@ -787,9 +787,8 @@ def load_multi_turn_environment(
         triton_client,
         triton_benchmark=triton_benchmark,
         triton_benchmark_runs=triton_benchmark_runs,
-        parallelize_scoring=False,
     )
-    group = FixedRubricGroup(rubrics=[api_rubric, static_rubric])
+    group = FixedRubricGroup(rubrics=[api_rubric, static_rubric], parallelize_scoring=False)
     return MultiTurnTritonEnv(
         dataset=train_dataset, 
         triton_client=triton_client, 
