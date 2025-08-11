@@ -5,8 +5,7 @@ import random
 import httpx
 import asyncio
 import weave
-from copy import deepcopy
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List
 from textwrap import dedent
 from verifiers.parsers.xml_parser import XMLParser
 from verifiers.envs.singleturn_env import SingleTurnEnv
@@ -312,7 +311,7 @@ def think_reward(completion, answer=None, state=None, task=None, info=None, **kw
     if len(thinking_content) == 1:
         content_length = len(thinking_content[0].strip())
         if content_length >= 100:
-            thinking_length = max(content_length - 5000, 0)
+            thinking_length = max(content_length - 10000, 0)
             return 0.4 * math.exp(-0.5*thinking_length/1000) - 0.2
     
     return -0.2
@@ -330,7 +329,7 @@ def one_code_blob_reward(completion, answer=None, state=None, task=None, info=No
     if len(code_blobs) == 1:
         code_length = len(code_blobs[0].strip())
         if code_length > 0:
-            code_length = max(code_length - 5000, 0)
+            code_length = max(code_length - 6000, 0)
             return 0.1 * math.exp(-0.5*code_length/1000)
     
     return -0.1
